@@ -214,3 +214,54 @@ html, body {
   #hud-container { top: 8px; }
   .user-box input { font-size: 16px; } /* Prevents iOS zoom */
 }
+/* =========================================
+   9. TOURIST RESULT BOX (two-line layout)
+   ========================================= */
+.result-tourist-box {
+  width: 100%; padding: 14px 16px; margin-bottom: 10px;
+  background: mediumslateblue; border-radius: 5px;
+  text-align: center; color: #fff;
+}
+.result-tourist-main {
+  font-size: clamp(1rem, 4.5vw, 1.35rem); font-weight: 700;
+  white-space: normal; word-break: break-word;
+}
+.result-tourist-sub {
+  font-size: clamp(0.75rem, 3vw, 0.95rem); opacity: 0.75;
+  margin-top: 4px; white-space: normal;
+}
+
+/* =========================================
+   10. OPTION WRAPPER & RATIONALE TOOLTIP
+   ========================================= */
+.opt-wrap {
+  position: relative; width: 100%;
+  display: flex; align-items: stretch; gap: 0;
+}
+.opt-wrap .neon-btn {
+  flex: 1; border-radius: 6px 0 0 6px; margin-top: 10px;
+}
+.rationale-btn {
+  flex-shrink: 0; width: 40px; margin-top: 10px;
+  background: rgba(3,233,244,0.08); border: 1px solid rgba(3,233,244,0.3);
+  border-left: none; border-radius: 0 6px 6px 0;
+  color: #03e9f4; font-size: 1.1rem; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  touch-action: manipulation; transition: background .2s;
+}
+.rationale-btn:hover { background: rgba(3,233,244,0.2); }
+.rationale-btn:active { transform: scale(.96); }
+
+.rationale-popover {
+  position: relative; width: 100%; margin-top: -1px;
+  background: #0a1520; border: 1px solid #03e9f4;
+  border-radius: 0 0 6px 6px; padding: 10px 14px;
+  color: #cde; font-size: clamp(.75rem, 3vw, .9rem);
+  line-height: 1.5; z-index: 200; animation: fadeInPop .18s ease;
+}
+@keyframes fadeInPop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
+
+@media (max-width: 480px) {
+  .rationale-btn { width: 36px; font-size: 1rem; }
+  .result-tourist-main { font-size: 1rem; }
+}

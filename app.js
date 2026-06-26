@@ -70,6 +70,7 @@
         const s = document.getElementById('hud-score'), m = document.getElementById('hud-move');
         if (s) s.textContent = `Монет: ${gameState.bank}`;
         if (m) m.textContent = `Месяц: ${gameState.move + 1}/${config.steps.length}`;
+        updateEfficiencyHUD(); // ── PATCH
     }
 
     function startTimer() {
@@ -283,32 +284,402 @@
                 if (op.conditionType >= 1 && op.conditionType <= 7 && gameState['extra'+op.conditionType] < op.requiredExtra) { 
                     c = false; m = ` (требуется: E${op.conditionType}≥${op.requiredExtra})`; 
                 }
-                o += `<button type="button" class="neon-btn ${c?'':'disabled'}" data-cost="${op.cost}" data-score="${op.scoreGain}" data-e1="${op.extra1Gain||0}" data-e2="${op.extra2Gain||0}" data-e3="${op.extra3Gain||0}" data-e4="${op.extra4Gain||0}" data-e5="${op.extra5Gain||0}" data-e6="${op.extra6Gain||0}" data-e7="${op.extra7Gain||0}" data-cond="${op.conditionType}" data-req="${op.requiredExtra}" data-next="${step.nextStep}" ${c?'':'disabled'}><span></span><span></span><span></span><span></span>${op.text}. Стоимость: ${op.cost}${m}</button>`;
+                // PATCH 3: build rationale tooltip from option data
+                const rationale = buildRationale(op, step.id);
+                o += `<div class="opt-wrap">
+                  <button type="button" class="neon-btn ${c?'':'disabled'}" data-cost="${op.cost}" data-score="${op.scoreGain}" data-e1="${op.extra1Gain||0}" data-e2="${op.extra2Gain||0}" data-e3="${op.extra3Gain||0}" data-e4="${op.extra4Gain||0}" data-e5="${op.extra5Gain||0}" data-e6="${op.extra6Gain||0}" data-e7="${op.extra7Gain||0}" data-cond="${op.conditionType}" data-req="${op.requiredExtra}" data-next="${step.nextStep}" ${c?'':'disabled'}><span></span><span></span><span></span><span></span>${op.text}. Стоимость: ${op.cost}${m}</button>
+                  <button type="button" class="rationale-btn" data-tip="${rationale}" aria-label="Пояснение">ℹ</button>
+                </div>`;
             });
             b.innerHTML = q + `<form>${o}</form>`;
+            // Rationale popover handler
+            b.querySelectorAll('.rationale-btn').forEach(rb => {
+                rb.onclick = (e) => {
+                    e.stopPropagation();
+                    document.querySelectorAll('.rationale-popover').forEach(p => p.remove());
+                    const pop = document.createElement('div');
+                    pop.className = 'rationale-popover';
+                    pop.textContent = rb.dataset.tip;
+                    rb.parentNode.insertBefore(pop, rb.nextSibling);
+                    setTimeout(() => pop.remove(), 4000);
+                };
+            });
+            document.addEventListener('click', () => {
+                document.querySelectorAll('.rationale-popover').forEach(p => p.remove());
+            }, { once: true });
             b.querySelectorAll('.neon-btn:not(.disabled)').forEach(btn => btn.onclick = e => handleOptionClick(btn));
+            appendHintButton(id); // ── PATCH: hint button
         }
         updateHUD();
     }
+
+
+    // ===================================================
+    // INSTRUCTIONAL PATCH — best-strategy solver
+    // ===================================================
+
+    /**
+     * Solve the game tree with simple greedy DP.
+     *
+     * Since steps are linear (no branching), the optimal play
+     * is: at each step, choose the option with the highest
+     * scoreGain that (a) costs ≤ remaining bank and
+     * (b) meets conditionType prerequisites given the extras
+     * accumulated so far.
+     *
+     * Returns { totalScore, path }
+     *   path[i] = { stepId, optionId, scoreGain, cost }
+     */
+    function solveBestStrategy() {
+        let bank = config.settings.startingBank;
+        let score = 0;
+        let extras = { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0 };
+        const path = [];
+
+        for (const step of config.steps) {
+            // Skip the "final trigger" step (single option, 0 cost/score)
+            if (step.options.length === 1 && step.nextStep === 'final') continue;
+
+            // Find the best affordable, available option
+            let best = null;
+            for (const op of step.options) {
+                if (op.cost > bank) continue;
+                if (op.conditionType >= 1 && op.conditionType <= 7 &&
+                    extras[op.conditionType] < op.requiredExtra) continue;
+                if (!best || op.scoreGain > best.scoreGain) best = op;
+            }
+
+            if (best) {
+                bank  -= best.cost;
+                score += best.scoreGain;
+                for (let i = 1; i <= 7; i++) {
+                    extras[i] += (best['extra' + i + 'Gain'] || 0);
+                }
+                path.push({
+                    stepId:    step.id,
+                    optionId:  best.id,
+                    optionText: best.text,
+                    scoreGain: best.scoreGain,
+                    cost:      best.cost
+                });
+            }
+        }
+
+        return { totalScore: score * config.settings.scoreMultiplier, path };
+    }
+
+    // Cached result — computed once per game session
+    let _bestStrategy = null;
+    function getBestStrategy() {
+        if (!_bestStrategy) _bestStrategy = solveBestStrategy();
+        return _bestStrategy;
+    }
+
+    
+    // ── PATCH: hand-written educational rationale (RU) ──────────────────────
+    const RATIONALE = {
+        "1-1": "Бывалые прагматики — опытные путешественники, которые хотят высокого качества за деньги. Они много тратят, но требуют зрелой инфраструктуры — отсюда высокая стоимость привлечения.",
+        "1-2": "Непритязательные туристы приезжают в любых условиях. Недорогой сегмент, но и поток невелик — бюджет уходит минимально, а прирост скромный.",
+        "1-3": "Семейные туристы — самый массовый и доходный сегмент Владивостока. Им нужны безопасность, разнообразие и доступность, поэтому вложения оправдываются большим потоком.",
+        "1-4": "Экстремалы — узкая аудитория. Инфраструктура для них дорога и специализирована, а массового потока не даёт — затраты сопоставимы с «Бывалыми», но отдача ниже.",
+
+        "2-1": "1–2 дня — транзитный формат. Туристы почти не тратят деньги в городе, поэтому экономический эффект минимален, несмотря на небольшие инвестиции.",
+        "2-2": "3–7 дней — стандартный туристский пакет. Хороший баланс между стоимостью разработки продукта и реальным потоком, но потенциал ещё не максимален.",
+        "2-3": "8–9 дней — оптимальный горизонт для Дальнего Востока. Турист успевает посетить острова, Русский мост, музеи. Длинные туры дают более высокий прирост посетителей.",
+        "2-4": "10+ дней — премиальный формат. Во Владивостоке пока не хватает контента на такой срок, отсюда высокая цена продукта и лишь незначительный выигрыш перед 8–9 днями.",
+
+        "3-1": "Хостелы — доступное жильё для молодёжи и бэкпекеров. Низкие затраты на строительство и хорошая заполняемость дают стабильный прирост туристского потока.",
+        "3-2": "Трёхзвёздочные отели — стандарт для массового рынка. Вложения чуть выше хостелов, но сегмент более конкурентный — прирост посетителей ниже ожидаемого.",
+        "3-3": "Глэмпинги отражают мировой тренд на экотуризм. Природа Приморья идеально подходит: невысокие затраты на строительство, но высокий интерес и уникальность продукта.",
+        "3-4": "Пятизвёздочные отели привлекают VIP-туристов и деловые делегации, которые тратят много. Высокая стоимость строительства окупается плотным потоком платёжеспособных гостей.",
+
+        "4-1": "Новый терминал аэропорта улучшит пропускную способность, но авиарейсов во Владивосток и так уже достаточно. Большие вложения дают умеренный прирост — узкое место не в аэропорту.",
+        "4-2": "Углубление дна морвокзала позволит принимать крупные круизные лайнеры. Это перспективное направление, но круизный рынок развивается медленно — краткосрочный эффект невысокий.",
+        "4-3": "Реконструкция автомобильных пунктов пропуска открывает въезд туристам из Китая, Кореи и Японии. Именно автотуристы и автобусные группы дают самый большой поток в регионе.",
+        "4-4": "Пляж у гостиницы — локальное благоустройство. Почти не требует бюджета и создаёт комфорт для уже приехавших туристов, но новых гостей почти не привлекает — отсюда неожиданно неплохой КПД.",
+
+        "5-1": "Паназиатская кухня — модный тренд, но во Владивостоке она уже есть повсюду. Туристам это не в новинку, конкурентного преимущества не создаёт.",
+        "5-2": "Русская кухня интересна иностранным туристам, но отечественных гостей ею не удивить. Влияние на поток минимально.",
+        "5-3": "Фастфуд решает базовую потребность, но не формирует гастрономический образ города. Низкий вклад в туристскую привлекательность.",
+        "5-4": "Дальневосточная кухня — краб, морской ёж, гребешок — это уникальное конкурентное преимущество Владивостока. Гастротуризм активно растёт, и аутентичная еда является весомым мотивом поездки.",
+
+        "6-1": "Электромопеды — модный и экологичный вариант для коротких поездок. Удобны в холмистом Владивостоке, но охватывают лишь небольшую часть туристских маршрутов.",
+        "6-2": "Троллейбусы — дёшево, но инфраструктура устарела и маршруты ограничены. Туристам неудобно разбираться в сети, реального прироста почти нет.",
+        "6-3": "Электрички связывают Владивосток с пригородами и позволяют добраться до природных объектов — полуострова, бухт, Уссурийска. Это именно то, что туристам нужно, при разумных затратах.",
+        "6-4": "Метро — масштабный проект, который долго строится и стоит дорого. В компактном Владивостоке его эффект для туристов значительно ниже, чем в городах-миллионниках.",
+
+        "7-1": "Один фестиваль в год — почти ничего. Событийный туризм строится на регулярности и разнообразии; одна точка не формирует поток.",
+        "7-2": "10 фестивалей — уже заметная событийная программа. Охватывает несколько сезонов и интересов, но всё ещё недостаточно для устойчивого потока.",
+        "7-3": "70 фестивалей — это более одного мероприятия в неделю. Владивосток превращается в постоянно живущий событиями город: это максимальный магнит для туристов.",
+        "7-4": "50 фестивалей в год — насыщенная программа с хорошим охватом. Чуть дешевле 70, а прирост туристов пропорционально ниже — но всё равно очень эффективно.",
+
+        "8-1": "Tigre de Cristal — крупнейшее интегрированное развлекательное казино региона. Привлекает состоятельных гостей из Азии, но это узкая аудитория.",
+        "8-2": "Туристско-информационный центр помогает ориентироваться в городе, но сам по себе не является ядром кластера — это вспомогательная инфраструктура.",
+        "8-3": "ВГУЭС Трэвел — университетское турагентство. Полезно для учебного туризма, но не создаёт конкурентного ядра кластера в масштабах города.",
+        "8-4": "Сильный туристский кластер не строится на одном предприятии — он требует сети якорных объектов. Без чёткого ядра кластер оказывается размытым, но зато средства не расходуются зря.",
+
+        "9-1": "Привлечение кадров из других регионов даёт быстрый результат и высокую квалификацию. Дорого из-за релокации, но такие специалисты сразу создают турпоток.",
+        "9-2": "Волонтёры дёшевы и энергичны, но нестабильны. Они не могут полностью заменить профессионалов, хотя и создают заметный эффект при минимальных затратах.",
+        "9-3": "Воспитание собственных кадров — стратегически лучшее решение. Дорого и долго, зато формирует устойчивую базу специалистов и ОТКРЫВАЕТ доступ к более эффективным опциям в следующих шагах.",
+        "9-4": "Рассчитывать, что кадры сами появятся — значит не управлять ситуацией. Небольшой органический прирост всё же происходит, но без системной работы отрасль теряет конкурентоспособность.",
+
+        "10-1": "Виртуальная экскурсия у внешних специалистов — дорогостоящая разработка. Привлекает туристов на этапе выбора направления, но эффективнее, если создана своими силами.",
+        "10-2": "Система бронирования у внешних специалистов — необходимый инструмент, но переплата посредникам снижает рентабельность. Своя система была бы выгоднее.",
+        "10-3": "Создать и экскурсию, и бронирование своими кадрами — идеально по соотношению цены и эффекта. Доступно только если на шаге 9 вы выбрали «Воспитание собственных» и вложились в специалистов.",
+        "10-4": "Отказ от цифровых инструментов в современном туризме — серьёзная ошибка, но небольшой поток всё равно приходит по старым каналам. Сэкономленные деньги не компенсируют упущенный потенциал.",
+
+        "11-1": "Без продвижения туристы узнают о Владивостоке случайно. Поток не растёт — это стратегический проигрыш, несмотря на нулевые затраты.",
+        "11-2": "Агентство знает рынок и инструменты, но работает за комиссию. Хороший результат, однако компетенции остаются у внешнего исполнителя, а не у вас.",
+        "11-3": "Продвижение своими кадрами — самый эффективный вариант по цене: дёшево, а результат такой же, как у агентства. Требует наличия подготовленной команды (шаг 9).",
+
+        "12-1": "Владивосток — не спортивный курорт, но площадки для активного отдыха есть. Акцент на спорте отвлекает ресурсы от более сильных сторон города.",
+        "12-2": "Пляжный туризм — главная ловушка. Сезон короткий, вода холодная, а туристы, приехав ради пляжа, разочаровываются. Это наносит серьёзный удар по репутации и потоку.",
+        "12-3": "Зимний туризм — незаслуженно забытое направление. Владивосток зимой красив, немноголюден и аутентичен. Акцент на этом не навредит потоку, а может и помочь.",
+        "12-4": "Этнокультурный туризм привлекателен, но во Владивостоке он ещё недостаточно развит как продукт. Акцент на нём слегка снижает эффективность продвижения.",
+
+        "13-1": "Это финальный шаг — посмотрим, что получилось!"
+    };
+
+    function buildRationale(op, stepId) {
+        const key = stepId + '-' + op.id;
+        return RATIONALE[key] || 'Нет пояснения для этого варианта.';
+    }
+    // ── END rationale table ───────────────────────────────────────────────────
+
+
+
+    // Per-move history for recap modal
+    let moveHistory = [];
+
+    /**
+     * Show post-move feedback overlay.
+     * bestScoreForStep  = scoreGain of optimal option at this step (×multiplier)
+     * playerScoreForStep = scoreGain of chosen option (×multiplier)
+     */
+    function showMoveFeedback(playerScore, bestScore, nextStepId) {
+        const diff = bestScore - playerScore;
+        const mult = config.settings.scoreMultiplier;
+        const isOptimal = diff <= 0;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'move-feedback-overlay';
+        overlay.style.cssText = `
+            position:fixed; inset:0; display:flex; align-items:center;
+            justify-content:center; z-index:5000; pointer-events:all;
+            background:rgba(0,0,0,0.55);`;
+
+        const box = document.createElement('div');
+        box.style.cssText = `
+            background:#141e30; border-radius:12px; padding:24px 32px;
+            text-align:center; max-width:340px; width:90%;
+            border:2px solid ${isOptimal ? '#03e9f4' : '#ff9900'};
+            box-shadow:0 0 24px ${isOptimal ? '#03e9f4' : '#ff9900'}55;`;
+
+        if (isOptimal) {
+            box.innerHTML = `
+                <div style="font-size:2.8rem;">🏆</div>
+                <div style="font-size:1.4rem; color:#03e9f4; font-weight:700; margin:10px 0;">
+                    Лучший ход!
+                </div>
+                <div style="color:#aaa; font-size:0.9rem;">
+                    Оптимальный выбор — так держать!
+                </div>`;
+        } else {
+            box.innerHTML = `
+                <div style="font-size:2.4rem;">📉</div>
+                <div style="font-size:1.3rem; color:#ff9900; font-weight:700; margin:10px 0;">
+                    Недополучено ${diff} туристов
+                </div>
+                <div style="color:#aaa; font-size:0.9rem;">
+                    Лучший вариант принёс бы на ${diff} туристов больше
+                </div>`;
+        }
+
+        const btn = document.createElement('button');
+        btn.className = 'neon-btn';
+        btn.style.cssText = 'margin-top:16px; width:100%;';
+        btn.innerHTML = '<span></span><span></span><span></span><span></span>Продолжить';
+        btn.onclick = () => {
+            overlay.remove();
+            loadGameStep(parseInt(nextStepId));
+        };
+        box.appendChild(btn);
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+    }
+
+    /** Return the best scoreGain for a given stepId, or null if step not found */
+    function getBestScoreForStep(stepId, currentBank, currentExtras) {
+        const step = config.steps.find(s => s.id === stepId);
+        if (!step) return null;
+        let best = null;
+        for (const op of step.options) {
+            if (op.cost > currentBank) continue;
+            if (op.conditionType >= 1 && op.conditionType <= 7 &&
+                currentExtras['extra' + op.conditionType] < op.requiredExtra) continue;
+            if (best === null || op.scoreGain > best) best = op.scoreGain;
+        }
+        return best;
+    }
+
+    // ── 4: Hint button ───────────────────────────────────────────────────────
+    /**
+     * Append a "Подсказка" button to the current step.
+     * On click it reveals which option text is optimal right now
+     * (without giving away the score value).
+     */
+    function appendHintButton(stepId) {
+        const b = getLoginBox();
+        const hint = document.createElement('button');
+        hint.type = 'button';   // CRITICAL: prevents form submit on click
+        hint.className = 'neon-btn';
+        hint.style.cssText = 'margin-top:6px; border-color:#888; color:#888; font-size:0.85rem;';
+        hint.innerHTML = '<span></span><span></span><span></span><span></span>💡 Подсказка';
+        let revealed = false;
+        hint.onclick = () => {
+            if (revealed) return;
+            revealed = true;
+            // FIX: build a LOCAL best choice from the CURRENT step using
+            // the player's ACTUAL bank/extras — not the global greedy path.
+            const step = config.steps.find(s => s.id === stepId);
+            if (!step) { hint.innerHTML = '❓ Нет данных шага'; return; }
+            let bestOpt = null;
+            for (const op of step.options) {
+                if (op.cost > gameState.bank) continue;
+                if (op.conditionType >= 1 && op.conditionType <= 7 &&
+                    gameState['extra' + op.conditionType] < op.requiredExtra) continue;
+                if (!bestOpt || op.scoreGain > bestOpt.scoreGain) bestOpt = op;
+            }
+            if (bestOpt) {
+                hint.innerHTML = `✅ Лучший вариант: «${bestOpt.text}»`;
+                hint.style.color = '#03e9f4';
+                hint.style.borderColor = '#03e9f4';
+            } else {
+                hint.innerHTML = '❓ Нет доступных вариантов';
+            }
+            // Do NOT navigate away — just show inline.
+        };
+        const form = b.querySelector('form');
+        if (form) form.appendChild(hint);
+        else b.appendChild(hint);
+    }
+
+    // ── 5: Efficiency HUD ───────────────────────────────────────────────────
+    function updateEfficiencyHUD() {
+        let effItem = document.getElementById('hud-efficiency');
+        if (!effItem) {
+            const hud = document.getElementById('hud-container');
+            if (!hud) return;
+            effItem = document.createElement('div');
+            effItem.className = 'hud-item';
+            effItem.id = 'hud-efficiency';
+            hud.appendChild(effItem);
+        }
+        const spent = config.settings.startingBank - gameState.bank;
+        const eff = spent > 0
+            ? ((gameState.visit * config.settings.scoreMultiplier) / spent).toFixed(1)
+            : '—';
+        effItem.textContent = `КПД: ${eff} т/м`;
+        effItem.title = 'Туристов на каждую потраченную монету';
+    }
+
+    // ── 6: Move-history recap modal ─────────────────────────────────────────
+    function showRecapModal() {
+        if (moveHistory.length === 0) return;
+
+        const overlay = document.createElement('div');
+        overlay.style.cssText = `
+            position:fixed; inset:0; background:rgba(0,0,0,0.8);
+            z-index:6000; overflow-y:auto; display:flex;
+            align-items:flex-start; justify-content:center; padding:20px;`;
+
+        let rows = moveHistory.map((m, i) => {
+            const good = m.playerScore >= m.bestScore;
+            const icon = good ? '✅' : '❌';
+            const diff = m.bestScore - m.playerScore;
+            return `<tr style="border-bottom:1px solid #333;">
+                <td style="padding:6px 4px; color:#aaa;">${i+1}</td>
+                <td style="padding:6px 4px; color:#fff; font-size:0.85rem;">${m.question.substring(0,30)}…</td>
+                <td style="padding:6px 4px; color:#03e9f4;">${m.playerChoice}</td>
+                <td style="padding:6px 4px; color:#ff9900;">${good ? '—' : m.bestChoice}</td>
+                <td style="padding:6px 4px; color:${good?'#4caf50':'#ff9900'}; font-weight:700;">${icon} ${good ? '+0' : '-'+diff}</td>
+            </tr>`;
+        }).join('');
+
+        overlay.innerHTML = `
+            <div style="background:#141e30; border-radius:12px; padding:20px;
+                        max-width:680px; width:100%; border:1px solid #03e9f4;">
+                <h2 style="color:#03e9f4; margin:0 0 16px;">📊 Разбор ходов</h2>
+                <div style="overflow-x:auto;">
+                <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
+                    <thead>
+                        <tr style="color:#888; border-bottom:1px solid #444;">
+                            <th style="padding:6px 4px; text-align:left;">#</th>
+                            <th style="padding:6px 4px; text-align:left;">Вопрос</th>
+                            <th style="padding:6px 4px; text-align:left;">Ваш выбор</th>
+                            <th style="padding:6px 4px; text-align:left;">Лучший выбор</th>
+                            <th style="padding:6px 4px; text-align:left;">Δ туристов</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>
+                </div>
+                <button id="close-recap" class="neon-btn" style="margin-top:16px; width:100%;">
+                    <span></span><span></span><span></span><span></span>Закрыть
+                </button>
+            </div>`;
+
+        document.body.appendChild(overlay);
+        overlay.querySelector('#close-recap').onclick = () => overlay.remove();
+    }
+    // ===================================================
+    // END INSTRUCTIONAL PATCH helpers
+    // ===================================================
 
     function handleOptionClick(btn) {
         const c = parseInt(btn.dataset.cost), sg = parseInt(btn.dataset.score);
         const e1 = parseInt(btn.dataset.e1), e2 = parseInt(btn.dataset.e2), e3 = parseInt(btn.dataset.e3), e4 = parseInt(btn.dataset.e4), e5 = parseInt(btn.dataset.e5), e6 = parseInt(btn.dataset.e6), e7 = parseInt(btn.dataset.e7);
         const ns = btn.dataset.next, ct = parseInt(btn.dataset.cond), re = parseInt(btn.dataset.req);
-        
+        const thisStepId = currentStepId;
+
         if (ns === 'final') { showFinalScreen(); return; }
+
+        // ── PATCH: capture best score BEFORE updating state ──────────────
+        const bestScoreRaw = getBestScoreForStep(thisStepId, gameState.bank, gameState) || 0;
+        const mult = config.settings.scoreMultiplier;
+
         gameState.move += 1;
         let cm = true;
         if (ct >= 1 && ct <= 7 && gameState['extra'+ct] < re) cm = false;
-        
-        if (cm) { 
-            gameState.bank -= c; gameState.visit += sg; 
-            gameState.extra1 += e1; gameState.extra2 += e2; gameState.extra3 += e3; gameState.extra4 += e4; 
-            gameState.extra5 += e5; gameState.extra6 += e6; gameState.extra7 += e7; 
+
+        let actualSg = 0;
+        if (cm) {
+            gameState.bank -= c; actualSg = sg; gameState.visit += sg;
+            gameState.extra1 += e1; gameState.extra2 += e2; gameState.extra3 += e3; gameState.extra4 += e4;
+            gameState.extra5 += e5; gameState.extra6 += e6; gameState.extra7 += e7;
         }
         saveGameState();
+        updateEfficiencyHUD(); // ── PATCH: update KPD
+
+        // ── PATCH: record move for recap ─────────────────────────────────
+        const step = config.steps.find(s => s.id === thisStepId);
+        if (step) {
+            const strat = getBestStrategy();
+            const bestEntry = strat.path.find(p => p.stepId === thisStepId);
+            moveHistory.push({
+                question:    step.question,
+                playerChoice: btn.textContent.replace(/\s+/g,' ').trim().split('.')[0],
+                playerScore:  actualSg * mult,
+                bestScore:    bestScoreRaw * mult,
+                bestChoice:   bestEntry ? bestEntry.optionText : '—'
+            });
+        }
+
         if (checkLoseCondition()) return;
-        loadGameStep(parseInt(ns));
+
+        // ── PATCH: show feedback overlay before next step ─────────────────
+        showMoveFeedback(actualSg * mult, bestScoreRaw * mult, ns);
+        // (loadGameStep is called inside overlay "Продолжить" button)
     }
 
     function showFinalScreen() {
@@ -316,9 +687,55 @@
         document.getElementById('hud-container').style.display = 'none';
         const b = getLoginBox();
         const sr = gameState.visit * config.settings.scoreMultiplier;
-        if (typeof Email !== 'undefined') { try { Email.send("miostvvguproject@mail.ru", "miostvvguproject@mail.ru", 'Результат:'+sr+'; Имя:'+gameState.name+'; Телефон:'+gameState.phone+'; Время:'+gameState.time+'; Айди:'+gameState.id, "this is the body", "smtp.mail.ru", "miostvvguproject@mail.ru", "HKWxL9y5TnFMhFGrZFWd"); } catch(e) {} }
-        b.innerHTML = `<h2 style="color:#03e9f4;">${config.ui.finalTitle}</h2><button type="button" class="neon-btn result-btn" disabled style="background:teal;color:#fff;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>Имя: ${gameState.name}</button><button type="button" class="neon-btn result-btn" disabled style="background:burlywood;color:#000;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>ID: ${gameState.id}</button><button type="button" class="neon-btn result-btn" disabled style="background:mediumslateblue;color:#fff;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>Туристов: ${sr}</button><button type="button" class="neon-btn result-btn" disabled style="background:green;color:#fff;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>Время: ${gameState.time}с</button><button type="button" class="neon-btn" id="btn-main-final" style="margin-top:30px;"><span></span><span></span><span></span><span></span>${config.ui.finalBtnMain}</button>`;
-        document.getElementById('btn-main-final').onclick = () => { resetGameState(); renderMainMenu(); };
+
+        // ── PATCH: compute best possible score ────────────────────────────
+        const bestResult = getBestStrategy();
+        const maxSr = bestResult.totalScore;
+        const pct = maxSr > 0 ? Math.round((sr / maxSr) * 100) : 0;
+
+        if (typeof Email !== 'undefined') { try { Email.send("miostvvguproject@mail.ru", "miostvvguproject@mail.ru", 'Результат:'+sr+'/'+maxSr+'; Имя:'+gameState.name+'; Телефон:'+gameState.phone+'; Время:'+gameState.time+'; Айди:'+gameState.id, "this is the body", "smtp.mail.ru", "miostvvguproject@mail.ru", "HKWxL9y5TnFMhFGrZFWd"); } catch(e) {} }
+
+        b.innerHTML = `
+            <h2 style="color:#03e9f4;">${config.ui.finalTitle}</h2>
+            <button type="button" class="neon-btn result-btn" disabled style="background:teal;color:#fff;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>Имя: ${gameState.name}</button>
+            <button type="button" class="neon-btn result-btn" disabled style="background:burlywood;color:#000;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>ID: ${gameState.id}</button>
+            <div class="result-tourist-box">
+                <div class="result-tourist-main">🧳 Туристов: ${sr}</div>
+                <div class="result-tourist-sub">из максимума: ${maxSr}</div>
+            </div>
+            <button type="button" class="neon-btn result-btn" disabled style="background:green;color:#fff;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>Время: ${gameState.time}с</button>
+
+            <!-- ── PATCH: visual progress bar ── -->
+            <div style="margin:14px 0 6px; text-align:left; color:#aaa; font-size:0.85rem;">
+                Эффективность стратегии: ${pct}%
+            </div>
+            <div style="background:#1a2a3a; border-radius:6px; height:18px; overflow:hidden; border:1px solid #03e9f4;">
+                <div id="score-bar-fill" style="height:100%; width:0%; background:linear-gradient(90deg,#03e9f4,#0077ff);
+                    border-radius:6px; transition:width 1.2s ease;"></div>
+            </div>
+
+            <button type="button" class="neon-btn" id="btn-recap" style="margin-top:20px; border-color:#ff9900; color:#ff9900;">
+                <span></span><span></span><span></span><span></span>📊 Разбор ходов
+            </button>
+            <button type="button" class="neon-btn" id="btn-main-final" style="margin-top:10px;">
+                <span></span><span></span><span></span><span></span>${config.ui.finalBtnMain}
+            </button>`;
+
+        // Animate bar after render
+        requestAnimationFrame(() => {
+            setTimeout(() => {
+                const fill = document.getElementById('score-bar-fill');
+                if (fill) fill.style.width = pct + '%';
+            }, 100);
+        });
+
+        document.getElementById('btn-recap').onclick = showRecapModal;
+        document.getElementById('btn-main-final').onclick = () => {
+            _bestStrategy = null; // reset cache
+            moveHistory = [];
+            resetGameState();
+            renderMainMenu();
+        };
     }
 
     function showLostScreen() {
