@@ -5,14 +5,31 @@
 
     let config = loadConfig();
     let gameState = {
-        move: 0, bank: 150, visit: 0, time: 0,
+        move: 0, bank: 150, visit: 0, time: 0, year: 1,
         extra1: 0, extra2: 0, extra3: 0, extra4: 0, extra5: 0, extra6: 0, extra7: 0,
-        id: null, name: '', phone: ''
+        id: null, name: '', phone: '',
+        // ── PATCH (year1-only mode): 'two' = full two-year game (with the
+        // Year 1 reserve restriction), 'one' = single-year game (no reserve,
+        // ends right after Year 1's last question).
+        playMode: 'two'
     };
     let isAdmin = false;
     let timerInterval = null;
     let currentStepId = null;
     let adminViewMode = 'game'; // 'game', 'list', 'edit'
+    let adminListYear = 1; // ── PATCH (year2 admin): which year's questions the admin is browsing/editing
+
+    // ── PATCH (year2 admin): returns (and lazily creates) the steps array for a given year
+    function stepsArrayFor(year) {
+        if (year === 2) {
+            if (!config.steps2) config.steps2 = [];
+            return config.steps2;
+        }
+        return config.steps;
+    }
+    function setStepsArrayFor(year, arr) {
+        if (year === 2) config.steps2 = arr; else config.steps = arr;
+    }
 
     document.addEventListener('DOMContentLoaded', () => {
         initSession();
@@ -29,20 +46,23 @@
         if (!sessionStorage.getItem('id')) {
             gameState.id = Math.floor(Math.random() * 900000) + 100000;
             sessionStorage.setItem('id', gameState.id);
-            ['move', 'bank', 'visit', 'time'].forEach(k => sessionStorage.setItem(k, gameState[k]));
+            ['move', 'bank', 'visit', 'time', 'year'].forEach(k => sessionStorage.setItem(k, gameState[k]));
             for(let i=1; i<=7; i++) sessionStorage.setItem('extra'+i, gameState['extra'+i]);
+            sessionStorage.setItem('playMode', gameState.playMode);
         } else {
-            ['move', 'bank', 'visit', 'time'].forEach(k => gameState[k] = parseInt(sessionStorage.getItem(k)) || gameState[k]);
+            ['move', 'bank', 'visit', 'time', 'year'].forEach(k => gameState[k] = parseInt(sessionStorage.getItem(k)) || gameState[k]);
             for(let i=1; i<=7; i++) gameState['extra'+i] = parseInt(sessionStorage.getItem('extra'+i)) || 0;
             gameState.id = sessionStorage.getItem('id');
             gameState.name = sessionStorage.getItem('name') || '';
             gameState.phone = sessionStorage.getItem('phone') || '';
+            gameState.playMode = sessionStorage.getItem('playMode') || 'two';
         }
     }
 
     function saveGameState() {
-        ['move', 'bank', 'visit', 'time'].forEach(k => sessionStorage.setItem(k, gameState[k]));
+        ['move', 'bank', 'visit', 'time', 'year'].forEach(k => sessionStorage.setItem(k, gameState[k]));
         for(let i=1; i<=7; i++) sessionStorage.setItem('extra'+i, gameState['extra'+i]);
+        sessionStorage.setItem('playMode', gameState.playMode);
         updateHUD();
     }
 
@@ -51,17 +71,123 @@
         gameState.bank = config.settings.startingBank;
         gameState.visit = 0;
         gameState.time = 0;
+        gameState.year = 1;
+        gameState.playMode = 'two'; // ── PATCH (year1-only mode): re-ask the mode each new game
         for(let i=1; i<=7; i++) gameState['extra'+i] = 0;
-        ['move', 'bank', 'visit', 'time'].forEach(k => sessionStorage.setItem(k, gameState[k]));
+        ['move', 'bank', 'visit', 'time', 'year'].forEach(k => sessionStorage.setItem(k, gameState[k]));
         for(let i=1; i<=7; i++) sessionStorage.setItem('extra'+i, 0);
+        sessionStorage.setItem('playMode', gameState.playMode);
+        _bestStrategy = null; // ── PATCH: recompute best-strategy for the new mode
+        _year1MaxScore = null;
         updateHUD();
+    }
+
+    // ── PATCH (year 2): coins that Year 1 is not allowed to touch.
+    // Year 2 has its own grant, so it never needs a reserve of its own.
+    // ── PATCH (year1-only mode): in single-year mode there's no reserve to keep,
+    // since Year 2 will never happen.
+    function currentReserve() {
+        if (gameState.playMode === 'one') return 0;
+        return gameState.year === 1 ? (config.settings.year2Reserve || 0) : 0;
+    }
+
+    // ── PATCH (year 2): which step list / step count is "current"?
+    function activeSteps() {
+        return gameState.year === 1 ? config.steps : (config.steps2 || []);
+    }
+    function totalStepCount() {
+        return config.steps.length + (config.steps2 ? config.steps2.length : 0);
+    }
+
+    // FIX: year2ScoreMultiplier was defined in config-default.js ("Year 2
+    // tourists count for more") but never actually read anywhere — every
+    // score calculation used the flat Year 1 scoreMultiplier regardless of
+    // year. This is now the single source of truth for which multiplier
+    // applies to a given year's moves.
+    function scoreMultiplierForYear(year) {
+        return year === 2
+            ? (config.settings.year2ScoreMultiplier || config.settings.scoreMultiplier)
+            : config.settings.scoreMultiplier;
+    }
+
+    // ── PATCH (year 1→2 review): called when Year 1's last step is reached.
+    // Gives the user a chance to review Year 1's move-by-move recap before
+    // choosing to proceed to Year 2 (previously this jumped straight into
+    // Year 2 with no pause).
+    function showYearOneEndScreen() {
+        document.getElementById('hud-container').style.display = 'none';
+        const b = getLoginBox();
+        // FIX (year2ScoreMultiplier): gameState.visit is now accrued already
+        // weighted by each move's own multiplier, so it must not be
+        // multiplied again here.
+        const sr = gameState.visit;
+
+        // ── PATCH: preliminary Year 1 totals (Year-1-only maximum, since
+        // Year 2 hasn't happened yet at this point)
+        const max1 = getYear1MaxScore();
+        const pct1 = max1 > 0 ? Math.round((sr / max1) * 100) : 0;
+
+        b.innerHTML = `
+            <h2 style="color:#03e9f4;">${config.ui.year1EndTitle || 'Год 1 завершён'}</h2>
+            <div class="result-tourist-box">
+                <div class="result-tourist-main"> Туристов за год 1: ${sr}</div>
+                <div class="result-tourist-sub">из максимума (год 1): ${max1}</div>
+            </div>
+
+            <div style="margin:14px 0 6px; text-align:left; color:#aaa; font-size:0.85rem;">
+                Эффективность стратегии (год 1): ${pct1}%
+            </div>
+            <div style="background:#1a2a3a; border-radius:6px; height:18px; overflow:hidden; border:1px solid #03e9f4;">
+                <div id="score-bar-fill-y1" style="height:100%; width:0%; background:linear-gradient(90deg,#03e9f4,#0077ff);
+                    border-radius:6px; transition:width 1.2s ease;"></div>
+            </div>
+
+            <button type="button" class="neon-btn" id="btn-recap-y1" style="margin-top:20px; border-color:#ff9900; color:#ff9900;">
+                <span></span><span></span><span></span><span></span> Разбор ходов
+            </button>
+            <button type="button" class="neon-btn" id="btn-proceed-year2" style="margin-top:10px;">
+                <span></span><span></span><span></span><span></span>${gameState.playMode === 'one' ? (config.ui.year1FinishBtn || 'Завершить игру') : config.ui.year2IntroBtn}
+            </button>`;
+
+        // Animate bar after render (same pattern as the final screen)
+        requestAnimationFrame(() => {
+            setTimeout(() => {
+                const fill = document.getElementById('score-bar-fill-y1');
+                if (fill) fill.style.width = pct1 + '%';
+            }, 100);
+        });
+
+        document.getElementById('btn-recap-y1').onclick = showRecapModal;
+        // ── PATCH (year1-only mode): one-year games end the game here instead
+        // of proceeding into Year 2.
+        document.getElementById('btn-proceed-year2').onclick = (gameState.playMode === 'one') ? showFinalScreen : startYearTwo;
+    }
+
+    // ── PATCH (year 2): called when the user chooses to proceed to Year 2.
+    function startYearTwo() {
+        gameState.year = 2;
+        gameState.move = 0;
+        gameState.bank += (config.settings.year2Grant || 0);
+        saveGameState();
+        const b = getLoginBox();
+        document.getElementById('hud-container').style.display = 'none';
+        b.innerHTML = `
+            <h2 style="color:#03e9f4;">${config.ui.year2IntroTitle}</h2>
+            ${(config.ui.year2IntroText || []).map(t => `<p>${t}</p>`).join('')}
+            <p style="color:#aaa;">Бюджет на второй год: ${gameState.bank}</p>
+            <form><button type="button" class="neon-btn" id="btn-start-year2"><span></span><span></span><span></span><span></span>${config.ui.year2IntroBtn}</button></form>
+        `;
+        document.getElementById('btn-start-year2').onclick = () => {
+            document.getElementById('hud-container').style.display = 'flex';
+            loadGameStep(config.steps2[0].id);
+        };
     }
 
     function createPersistentHUD() {
         let hud = document.getElementById('hud-container');
         if (!hud) {
             hud = document.createElement('div'); hud.id = 'hud-container';
-            hud.innerHTML = `<div class="hud-item" id="hud-score">Монет: ${gameState.bank}</div><div class="hud-item" id="hud-move">Месяц: ${gameState.move + 1}/${config.steps.length}</div>`;
+            hud.innerHTML = `<div class="hud-item" id="hud-score">Монет: ${gameState.bank}</div><div class="hud-item" id="hud-move">Год ${gameState.year}, месяц: ${gameState.move + 1}/${activeSteps().length}</div>`;
             document.body.prepend(hud);
         }
     }
@@ -69,7 +195,7 @@
     function updateHUD() {
         const s = document.getElementById('hud-score'), m = document.getElementById('hud-move');
         if (s) s.textContent = `Монет: ${gameState.bank}`;
-        if (m) m.textContent = `Месяц: ${gameState.move + 1}/${config.steps.length}`;
+        if (m) m.textContent = `Год ${gameState.year}, месяц: ${gameState.move + 1}/${activeSteps().length}`;
         updateEfficiencyHUD(); // ── PATCH
     }
 
@@ -79,7 +205,7 @@
     }
 
     function checkLoseCondition() {
-        if (gameState.move > config.steps.length) { 
+        if (gameState.move > activeSteps().length) { 
             gameState.visit = "0. Превышено число ходов!"; 
             showLostScreen(); return true; 
         }
@@ -94,6 +220,22 @@
         let b = document.querySelector('.login-box');
         if (!b) { b = document.createElement('div'); b.className = 'login-box'; document.body.appendChild(b); }
         return b;
+    }
+
+    // ── PATCH (year1-only mode): let the player choose, before registering,
+    // whether to play just Year 1 (no reserve restriction) or the full two
+    // years (with the Year 1 reserve kept for Year 2).
+    function renderModeSelect() {
+        const b = getLoginBox();
+        b.innerHTML = `
+            <h2>${config.ui.modeSelectTitle || 'Выберите режим игры'}</h2>
+            <p>${config.ui.modeSelectText || 'Можно сыграть только первый год (без ограничения на резерв бюджета) или пройти оба года подряд (часть бюджета первого года резервируется на второй).'}</p>
+            <form>
+                <button type="button" class="neon-btn" id="btn-mode-one"><span></span><span></span><span></span><span></span>${config.ui.modeOneBtn || 'Только 1 год'}</button>
+                <button type="button" class="neon-btn" id="btn-mode-two"><span></span><span></span><span></span><span></span>${config.ui.modeTwoBtn || 'Полные 2 года'}</button>
+            </form>`;
+        document.getElementById('btn-mode-one').onclick = () => { gameState.playMode = 'one'; _bestStrategy = null; _year1MaxScore = null; renderRegistration(); };
+        document.getElementById('btn-mode-two').onclick = () => { gameState.playMode = 'two'; _bestStrategy = null; _year1MaxScore = null; renderRegistration(); };
     }
 
     // ===== ADMIN NAVIGATION & AUTO-LINKING =====
@@ -113,30 +255,38 @@
                     <button type="button" class="neon-btn" id="btn-rules"><span></span><span></span><span></span><span></span><span class="btn-text">${config.ui.rulesBtn}</span></button>
                 </form>
                 <div class="admin-field" data-tooltip="Подзаголовок"><input type="text" class="admin-editable" data-ui="mainSubtitle" value="${config.ui.mainSubtitle}" style="font-size:clamp(1.5rem, 5vw, 3rem); text-align:center; margin-top:20px; color:#03e9f4;"></div>
-                <button class="nav-btn" id="btn-manage-questions">📋 Управление вопросами</button>
+                <button class="nav-btn" id="btn-manage-questions"> Управление вопросами</button>
             `;
-            document.getElementById('btn-start').onclick = renderRegistration;
+            document.getElementById('btn-start').onclick = renderModeSelect;
             document.getElementById('btn-rules').onclick = renderRules;
             document.getElementById('btn-manage-questions').onclick = () => { adminViewMode = 'list'; renderMainMenu(); };
             
         } else if (!isAdmin) {
             b.innerHTML = `<h2>${config.ui.mainTitle}</h2><form><button type="button" class="neon-btn" id="btn-start"><span></span><span></span><span></span><span></span>${config.ui.startBtn}</button><button type="button" class="neon-btn" id="btn-rules"><span></span><span></span><span></span><span></span>${config.ui.rulesBtn}</button></form><h2>${config.ui.mainSubtitle}</h2>`;
-            document.getElementById('btn-start').onclick = renderRegistration;
+            document.getElementById('btn-start').onclick = renderModeSelect;
             document.getElementById('btn-rules').onclick = renderRules;
         }
     }
 
     function renderAdminQuestionList(b) {
+        // ── PATCH (year2 admin): list either Year 1 or Year 2 questions via tabs
+        const year = adminListYear;
+        const steps = stepsArrayFor(year);
+
         let html = `
             <div class="nav-header">
-                <button class="nav-btn" id="btn-back-home">🏠 На главную</button>
-                <h2 style="color:#03e9f4; margin:10px 0;">Вопросы (${config.steps.length})</h2>
+                <button class="nav-btn" id="btn-back-home"> На главную</button>
+                <h2 style="color:#03e9f4; margin:10px 0;">Вопросы (${steps.length})</h2>
+            </div>
+            <div class="nav-header" style="margin-bottom:10px;">
+                <button class="nav-btn" id="btn-tab-year1" style="${year===1?'background:#03e9f4;color:#000;':''}">Год 1 (${config.steps.length})</button>
+                <button class="nav-btn" id="btn-tab-year2" style="${year===2?'background:#03e9f4;color:#000;':''}">Год 2 (${(config.steps2||[]).length})</button>
             </div>
             <div class="admin-scroll-list">`;
-        
-        config.steps.forEach((step, idx) => {
+
+        steps.forEach((step, idx) => {
             const isTop = (idx === 0);
-            const isBottom = (idx === config.steps.length - 1);
+            const isBottom = (idx === steps.length - 1);
             
             html += `
             <div class="admin-option-card" style="margin-bottom:10px; padding:10px; border:1px solid #444; border-radius:6px; display:flex; justify-content:space-between; align-items:center;">
@@ -145,60 +295,70 @@
                     <br><small style="color:#aaa;">Вариантов: ${step.options.length}</small>
                 </div>
                 <div style="display:flex; gap:5px; align-items:center;">
-                    <button class="move-btn" onclick="window.moveQuestion(${idx}, 'up')" ${isTop ? 'disabled' : ''} title="Вверх">▲</button>
-                    <button class="move-btn" onclick="window.moveQuestion(${idx}, 'down')" ${isBottom ? 'disabled' : ''} title="Вниз">▼</button>
-                    <button class="neon-btn" style="width:auto; padding:5px 10px; font-size:0.8rem;" onclick="editQuestion(${step.id})">✏️</button>
-                    <button class="neon-btn" style="width:auto; padding:5px 10px; font-size:0.8rem; background:#ff4444;" onclick="deleteQuestion(${step.id})">🗑️</button>
+                    <button class="move-btn" onclick="window.moveQuestion(${idx}, 'up', ${year})" ${isTop ? 'disabled' : ''} title="Вверх">▲</button>
+                    <button class="move-btn" onclick="window.moveQuestion(${idx}, 'down', ${year})" ${isBottom ? 'disabled' : ''} title="Вниз">▼</button>
+                    <button class="neon-btn" style="width:auto; min-height:40px; padding:8px 12px; font-size:0.8rem;" onclick="editQuestion(${step.id}, ${year})">Изменить</button>
+                    <button class="neon-btn" style="width:auto; min-height:40px; padding:8px 12px; font-size:0.8rem; background:#ff4444;" onclick="deleteQuestion(${step.id}, ${year})">Удалить</button>
                 </div>
             </div>`;
         });
         
         html += `</div>
-            <button class="neon-btn" id="btn-add-question" style="margin-top:15px; border:1px dashed var(--neon-blue); background:rgba(3,233,244,0.1);"><span></span><span></span><span></span><span></span>➕ Добавить вопрос</button>`;
+            <button class="neon-btn" id="btn-add-question" style="margin-top:15px; border:1px dashed var(--neon-blue); background:rgba(3,233,244,0.1);"><span></span><span></span><span></span><span></span> Добавить вопрос</button>`;
             
         b.innerHTML = html;
         document.getElementById('btn-back-home').onclick = () => { adminViewMode = 'game'; renderMainMenu(); };
-        document.getElementById('btn-add-question').onclick = () => addQuestion();
+        document.getElementById('btn-tab-year1').onclick = () => { adminListYear = 1; renderAdminQuestionList(b); };
+        document.getElementById('btn-tab-year2').onclick = () => { adminListYear = 2; renderAdminQuestionList(b); };
+        document.getElementById('btn-add-question').onclick = () => addQuestion(year);
     }
 
     // ===== GLOBAL FUNCTIONS FOR BUTTONS =====
-    window.moveQuestion = function(index, direction) {
+    // ── PATCH (year2 admin): all of these now take an explicit `year` (1 or 2)
+    // so admins can manage Year 1 and Year 2 question lists independently.
+    window.moveQuestion = function(index, direction, year) {
+        year = year || 1;
+        const arr = stepsArrayFor(year);
         if (direction === 'up' && index > 0) {
             // Swap with previous
-            const temp = config.steps[index];
-            config.steps[index] = config.steps[index - 1];
-            config.steps[index - 1] = temp;
-            relinkQuestions();
+            const temp = arr[index];
+            arr[index] = arr[index - 1];
+            arr[index - 1] = temp;
+            relinkQuestions(year);
             renderAdminQuestionList(getLoginBox());
-        } else if (direction === 'down' && index < config.steps.length - 1) {
+        } else if (direction === 'down' && index < arr.length - 1) {
             // Swap with next
-            const temp = config.steps[index];
-            config.steps[index] = config.steps[index + 1];
-            config.steps[index + 1] = temp;
-            relinkQuestions();
+            const temp = arr[index];
+            arr[index] = arr[index + 1];
+            arr[index + 1] = temp;
+            relinkQuestions(year);
             renderAdminQuestionList(getLoginBox());
         }
     };
 
-    window.editQuestion = function(stepId) {
+    window.editQuestion = function(stepId, year) {
+        adminListYear = year || 1;
         currentStepId = stepId;
         adminViewMode = 'edit';
         loadGameStep(stepId);
     };
 
-    window.deleteQuestion = function(stepId) {
-        if (config.steps.length <= 1) { alert("Нельзя удалить последний вопрос!"); return; }
+    window.deleteQuestion = function(stepId, year) {
+        year = year || 1;
+        const arr = stepsArrayFor(year);
+        if (arr.length <= 1) { alert("Нельзя удалить последний вопрос!"); return; }
         if (confirm("Удалить этот вопрос? Игра будет автоматически перестроена.")) {
-            config.steps = config.steps.filter(s => s.id !== stepId);
-            relinkQuestions();
+            setStepsArrayFor(year, arr.filter(s => s.id !== stepId));
+            relinkQuestions(year);
             renderMainMenu();
         }
     };
 
-    window.addQuestion = function() {
-        const newId = config.steps.length > 0 ? Math.max(...config.steps.map(s => s.id)) + 1 : 1;
-        config.steps.push({
-            id: newId, question: "Новый вопрос",
+    window.addQuestion = function(year) {
+        year = year || 1;
+        const arr = stepsArrayFor(year);
+        const newQuestion = {
+            id: 0, question: "Новый вопрос",
             options: [
                 { id: 1, text: "Вариант 1", cost: 0, scoreGain: 0, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
                 { id: 2, text: "Вариант 2", cost: 0, scoreGain: 0, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
@@ -206,18 +366,35 @@
                 { id: 4, text: "Вариант 4", cost: 0, scoreGain: 0, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
             ],
             nextStep: 'final'
-        });
-        relinkQuestions();
-        editQuestion(newId);
+        };
+        // FIX: insert right before the final-trigger step (single option,
+        // nextStep === 'final') instead of always appending at the end.
+        // Previously, appending after an existing final trigger silently
+        // demoted the real "Узнать результаты..." step into an ordinary
+        // mid-game question and turned the brand-new blank question into
+        // the new final trigger.
+        const isFinalTrigger = s => s.options.length === 1 && s.nextStep === 'final';
+        let insertAt = arr.length;
+        if (arr.length > 0 && isFinalTrigger(arr[arr.length - 1])) {
+            insertAt = arr.length - 1;
+        }
+        arr.splice(insertAt, 0, newQuestion);
+        relinkQuestions(year);
+        editQuestion(arr[insertAt].id, year);
     };
 
-    // Automatically re-chains all questions 1->2->3...->final
-    function relinkQuestions() {
-        // Sort by ID is not needed if we assume array order is visual order
-        // But we must update IDs and nextStep links
-        for (let i = 0; i < config.steps.length; i++) {
-            config.steps[i].id = i + 1;
-            config.steps[i].nextStep = (i === config.steps.length - 1) ? 'final' : (i + 2);
+    // Automatically re-chains all questions 1->2->3...->final within a single year's list
+    // ── FIX (year2 id collision): Year 2 ids must keep the +100 offset (101, 102, ...)
+    // so they never collide with Year 1's 1..N ids. Without this, moving/adding/deleting
+    // a Year 2 question reset its ids back to 1, 2, 3..., which then collided with Year 1
+    // question ids and caused wrong rationale tooltips (buildRationale keys on stepId-optId).
+    function relinkQuestions(year) {
+        year = year || 1;
+        const arr = stepsArrayFor(year);
+        const base = (year === 2) ? 100 : 0;
+        for (let i = 0; i < arr.length; i++) {
+            arr[i].id = base + i + 1;
+            arr[i].nextStep = (i === arr.length - 1) ? 'final' : (base + i + 2);
         }
         saveConfig(config);
     }
@@ -253,7 +430,7 @@
         if (isAdmin) {
             b.innerHTML = `
                 <div class="admin-field" data-tooltip="Правила (каждый пункт с новой строки)"><textarea class="admin-editable" data-ui="rulesText" rows="5" style="width:100%; text-align:left; font-size:1rem; margin-bottom:20px; background:rgba(0,0,0,0.3); color:#fff; border:1px dashed #555;">${config.ui.rulesText.join('\n')}</textarea></div>
-                <form><button type="button" class="nav-btn" id="btn-back-rules">🔙 Назад</button></form>
+                <form><button type="button" class="nav-btn" id="btn-back-rules"> Назад</button></form>
             `;
             document.getElementById('btn-back-rules').onclick = () => { adminViewMode = 'game'; renderMainMenu(); };
         } else {
@@ -266,16 +443,20 @@
     function loadGameStep(id) {
         if (checkLoseCondition()) return;
         currentStepId = id;
-        const step = config.steps.find(s => s.id === id);
+        // ── PATCH (year2 admin): admin browses/edits whichever year's list is
+        // selected (adminListYear), independent of the live session's gameState.year.
+        const stepsArr = isAdmin ? stepsArrayFor(adminListYear) : activeSteps();
+        const step = stepsArr.find(s => s.id === id);
         if (!step) {
-            if (id > config.steps.length) { showFinalScreen(); return; }
-            loadGameStep(Math.max(1, id - 1)); return;
+            if (isAdmin) { adminViewMode = 'list'; renderMainMenu(); return; }
+            if (gameState.year === 1) { showYearOneEndScreen(); return; }
+            showFinalScreen(); return;
         }
         const b = getLoginBox();
         document.getElementById('hud-container').style.display = 'flex';
         
         if (isAdmin) {
-            renderAdminStepEditor(step, b);
+            renderAdminStepEditor(step, b, adminListYear);
         } else {
             const q = `<p id="questt" style="font-size:3vh;text-align:left;margin-bottom:30px">${step.question}</p>`;
             let o = '';
@@ -283,6 +464,12 @@
                 let c = true, m = '';
                 if (op.conditionType >= 1 && op.conditionType <= 7 && gameState['extra'+op.conditionType] < op.requiredExtra) { 
                     c = false; m = ` (требуется: E${op.conditionType}≥${op.requiredExtra})`; 
+                }
+                if (op.cost > gameState.bank - currentReserve()) {
+                    c = false;
+                    m = (gameState.playMode === 'one')
+                        ? ' (недостаточно бюджета)'
+                        : ` (нужно оставить резерв на год 2: ${currentReserve()})`;
                 }
                 // PATCH 3: build rationale tooltip from option data
                 const rationale = buildRationale(op, step.id);
@@ -307,7 +494,7 @@
             document.addEventListener('click', () => {
                 document.querySelectorAll('.rationale-popover').forEach(p => p.remove());
             }, { once: true });
-            b.querySelectorAll('.neon-btn:not(.disabled)').forEach(btn => btn.onclick = e => handleOptionClick(btn));
+            b.querySelectorAll('.neon-btn:not(.disabled)').forEach(btn => btn.onclick = e => selectOption(btn));
             appendHintButton(id); // ── PATCH: hint button
         }
         updateHUD();
@@ -327,45 +514,71 @@
      * (b) meets conditionType prerequisites given the extras
      * accumulated so far.
      *
+     * ── PATCH (year2): continues the same simulation into Year 2 —
+     * respecting the Year 1 reserve, then adding the Year 2 grant — instead
+     * of stopping after Year 1. Previously this only ever solved Year 1,
+     * so a full Year 1+2 playthrough's actual score could exceed the
+     * reported "maximum" (>100% efficiency), which was the bug.
+     *
      * Returns { totalScore, path }
-     *   path[i] = { stepId, optionId, scoreGain, cost }
+     *   path[i] = { stepId, year, optionId, scoreGain, cost }
      */
     function solveBestStrategy() {
         let bank = config.settings.startingBank;
         let score = 0;
         let extras = { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0 };
         const path = [];
+        // ── PATCH (year1-only mode): no reserve needed if Year 2 will never happen
+        const reserve = (gameState.playMode === 'one') ? 0 : (config.settings.year2Reserve || 0);
 
-        for (const step of config.steps) {
-            // Skip the "final trigger" step (single option, 0 cost/score)
-            if (step.options.length === 1 && step.nextStep === 'final') continue;
+        function playYear(steps, year, bankFloor) {
+            for (const step of steps) {
+                // Skip the "final trigger" step (single option, 0 cost/score)
+                if (step.options.length === 1 && step.nextStep === 'final') continue;
 
-            // Find the best affordable, available option
-            let best = null;
-            for (const op of step.options) {
-                if (op.cost > bank) continue;
-                if (op.conditionType >= 1 && op.conditionType <= 7 &&
-                    extras[op.conditionType] < op.requiredExtra) continue;
-                if (!best || op.scoreGain > best.scoreGain) best = op;
-            }
-
-            if (best) {
-                bank  -= best.cost;
-                score += best.scoreGain;
-                for (let i = 1; i <= 7; i++) {
-                    extras[i] += (best['extra' + i + 'Gain'] || 0);
+                // Find the best affordable, available option
+                let best = null;
+                for (const op of step.options) {
+                    if (op.cost > bank - bankFloor) continue;
+                    if (op.conditionType >= 1 && op.conditionType <= 7 &&
+                        extras[op.conditionType] < op.requiredExtra) continue;
+                    if (!best || op.scoreGain > best.scoreGain) best = op;
                 }
-                path.push({
-                    stepId:    step.id,
-                    optionId:  best.id,
-                    optionText: best.text,
-                    scoreGain: best.scoreGain,
-                    cost:      best.cost
-                });
+
+                if (best) {
+                    bank  -= best.cost;
+                    // FIX (year2ScoreMultiplier): weight by this year's own
+                    // multiplier as we go, instead of applying one flat
+                    // multiplier to the whole Year1+Year2 total at the end.
+                    score += best.scoreGain * scoreMultiplierForYear(year);
+                    for (let i = 1; i <= 7; i++) {
+                        extras[i] += (best['extra' + i + 'Gain'] || 0);
+                    }
+                    path.push({
+                        stepId:    step.id,
+                        year:      year,
+                        optionId:  best.id,
+                        optionText: best.text,
+                        scoreGain: best.scoreGain,
+                        cost:      best.cost
+                    });
+                }
             }
         }
 
-        return { totalScore: score * config.settings.scoreMultiplier, path };
+        // Year 1 — must leave the Year 2 reserve untouched, mirroring real gameplay
+        // (reserve is 0 in single-year mode, so nothing is held back)
+        playYear(config.steps, 1, reserve);
+
+        // ── PATCH (year2): if a Year 2 exists AND the player chose the full
+        // two-year mode, continue the simulation into it
+        if (gameState.playMode !== 'one' && config.steps2 && config.steps2.length) {
+            bank += (config.settings.year2Grant || 0);
+            playYear(config.steps2, 2, 0);
+        }
+
+        // FIX (year2ScoreMultiplier): score is already weighted per-year above.
+        return { totalScore: score, path };
     }
 
     // Cached result — computed once per game session
@@ -373,6 +586,39 @@
     function getBestStrategy() {
         if (!_bestStrategy) _bestStrategy = solveBestStrategy();
         return _bestStrategy;
+    }
+
+    // ── PATCH (year 1→2 review): Year-1-only max score, for the preliminary
+    // totals shown at the end of Year 1 (before Year 2 has even started, so
+    // the full Year 1+2 maximum from solveBestStrategy() wouldn't be a fair
+    // comparison yet).
+    function solveYear1MaxScore() {
+        let bank = config.settings.startingBank;
+        let score = 0;
+        let extras = { 1:0, 2:0, 3:0, 4:0, 5:0, 6:0, 7:0 };
+        const reserve = (gameState.playMode === 'one') ? 0 : (config.settings.year2Reserve || 0);
+
+        for (const step of config.steps) {
+            if (step.options.length === 1 && step.nextStep === 'final') continue;
+            let best = null;
+            for (const op of step.options) {
+                if (op.cost > bank - reserve) continue;
+                if (op.conditionType >= 1 && op.conditionType <= 7 &&
+                    extras[op.conditionType] < op.requiredExtra) continue;
+                if (!best || op.scoreGain > best.scoreGain) best = op;
+            }
+            if (best) {
+                bank -= best.cost;
+                score += best.scoreGain;
+                for (let i = 1; i <= 7; i++) extras[i] += (best['extra' + i + 'Gain'] || 0);
+            }
+        }
+        return score * config.settings.scoreMultiplier;
+    }
+    let _year1MaxScore = null;
+    function getYear1MaxScore() {
+        if (_year1MaxScore === null) _year1MaxScore = solveYear1MaxScore();
+        return _year1MaxScore;
     }
 
     
@@ -437,7 +683,46 @@
         "12-3": "Зимний туризм — незаслуженно забытое направление. Владивосток зимой красив, немноголюден и аутентичен. Акцент на этом не навредит потоку, а может и помочь.",
         "12-4": "Этнокультурный туризм привлекателен, но во Владивостоке он ещё недостаточно развит как продукт. Акцент на нём слегка снижает эффективность продвижения.",
 
-        "13-1": "Это финальный шаг — посмотрим, что получилось!"
+        "13-1": "Это финальный шаг — посмотрим, что получилось!",
+
+        // ── PATCH: Year 2 rationale (previously missing entirely — every
+        // Year 2 option fell back to the generic "Нет пояснения" text) ──
+        "101-1": "Хостелы во втором сезоне — надёжный и недорогой способ нарастить номерной фонд, но конкуренция в этом сегменте уже выросла с первого года.",
+        "101-2": "Глэмпинги продолжают набирать популярность у туристов, ищущих природу и уникальный опыт, — дороже хостелов, но и отдача выше.",
+        "101-3": "Собственные строители, обученные в первый год, расширяют номерной фонд быстрее и дешевле внешних подрядчиков — практический эффект инвестиции в кадры.",
+        "101-4": "Отказ от расширения экономит бюджет, но упускает спрос уже сформированного за первый год потока туристов.",
+
+        "102-1": "Более частые электрички — постепенное улучшение доступности для тех, кто уже выбрал этот вид транспорта.",
+        "102-2": "Автобусные маршруты для гостей из Китая, Кореи и Японии открывают целый новый международный сегмент — самый выгодный шаг для транспортной доступности во втором сезоне.",
+        "102-3": "Ничего не менять — самый дешёвый вариант, но транспортная доступность второго сезона остаётся на уровне первого года.",
+
+        "103-1": "Дальневосточная кухня — устойчивое гастрономическое позиционирование города, которое во второй сезон продолжает привлекать гурманов.",
+        "103-2": "Фастфуд закрывает базовый спрос, но не усиливает репутацию города как гастрономического направления.",
+        "103-3": "Без изменений — гастрономическое предложение второго сезона не развивается дальше уровня первого года.",
+
+        "104-1": "Стороннее агентство снова даёт результат, но комиссия посредника делает продвижение менее выгодным, чем свои силы.",
+        "104-2": "Команда, обученная в первый год, продвигает город дешевле и эффективнее агентства — прямая отдача от вложений в кадры.",
+        "104-3": "Отказ от продвижения ничего не стоит, но и не приносит новых туристов во втором сезоне.",
+
+        "105-1": "Повтор прошлогоднего календаря фестивалей — стабильный, но не растущий вариант событийной программы.",
+        "105-2": "Крупный якорный фестиваль, приуроченный к уже сформированному кластеру, усиливает его как точку притяжения — самый сильный вариант для второго сезона.",
+        "105-3": "Сокращение программы экономит бюджет, но снижает событийную привлекательность города во второй сезон.",
+
+        "106-1": "Горнолыжный курорт — дорогостоящий, но мощный якорь для зимнего направления, недооценённого во Владивостоке.",
+        "106-2": "Зимние фестивали и ярмарки — доступный способ оживить зимний сезон без крупных капитальных вложений.",
+        "106-3": "Команда, обученная в первый год, развивает зимний продукт дешевле и эффективнее — снова окупается инвестиция в кадры.",
+        "106-4": "Не развивать зимний туризм — ничего не стоит, но оставляет город без круглогодичного турпотока.",
+
+        "107-1": "Внешние тренеры быстро поднимают уровень сервиса, но это разовая и не самая бюджетная услуга.",
+        "107-2": "Свои кадры, обученные в первый год, внедряют стандарты сервиса дешевле и с не меньшим эффектом.",
+        "107-3": "Программа лояльности удерживает уже приехавших туристов и мотивирует их возвращаться, при умеренных затратах.",
+        "107-4": "Без изменений в сервисе — бюджет экономится, но качество гостеприимства не растёт.",
+
+        "108-1": "Агентство обновляет цифровое присутствие быстро, но за существенную плату посреднику.",
+        "108-2": "Своя команда делает то же самое дешевле и эффективнее — сервис уже наработан за первый год.",
+        "108-3": "Экономия бюджета за счёт отказа от цифрового развития — но город рискует отстать в онлайн-продвижении.",
+
+        "109-1": "Это финальный шаг второго сезона — посмотрим, что получилось за оба года!"
     };
 
     function buildRationale(op, stepId) {
@@ -477,7 +762,7 @@
 
         if (isOptimal) {
             box.innerHTML = `
-                <div style="font-size:2.8rem;">🏆</div>
+                <div style="font-size:2.8rem;"></div>
                 <div style="font-size:1.4rem; color:#03e9f4; font-weight:700; margin:10px 0;">
                     Лучший ход!
                 </div>
@@ -486,7 +771,7 @@
                 </div>`;
         } else {
             box.innerHTML = `
-                <div style="font-size:2.4rem;">📉</div>
+                <div style="font-size:2.4rem;"></div>
                 <div style="font-size:1.3rem; color:#ff9900; font-weight:700; margin:10px 0;">
                     Недополучено ${diff} туристов
                 </div>
@@ -510,14 +795,23 @@
 
     /** Return the best scoreGain for a given stepId, or null if step not found */
     function getBestScoreForStep(stepId, currentBank, currentExtras) {
-        const step = config.steps.find(s => s.id === stepId);
+        const best = getBestOptionForStep(stepId, currentBank, currentExtras);
+        return best ? best.scoreGain : null;
+    }
+
+    // ── PATCH (year2): same search, but returns the full option object (so
+    // callers can show its text, not just its score). Uses activeSteps() —
+    // i.e. whichever year's step list is currently live — so it works
+    // correctly for both Year 1 and Year 2 questions.
+    function getBestOptionForStep(stepId, currentBank, currentExtras) {
+        const step = activeSteps().find(s => s.id === stepId);
         if (!step) return null;
         let best = null;
         for (const op of step.options) {
             if (op.cost > currentBank) continue;
             if (op.conditionType >= 1 && op.conditionType <= 7 &&
                 currentExtras['extra' + op.conditionType] < op.requiredExtra) continue;
-            if (best === null || op.scoreGain > best) best = op.scoreGain;
+            if (best === null || op.scoreGain > best.scoreGain) best = op;
         }
         return best;
     }
@@ -534,28 +828,31 @@
         hint.type = 'button';   // CRITICAL: prevents form submit on click
         hint.className = 'neon-btn';
         hint.style.cssText = 'margin-top:6px; border-color:#888; color:#888; font-size:0.85rem;';
-        hint.innerHTML = '<span></span><span></span><span></span><span></span>💡 Подсказка';
+        hint.innerHTML = '<span></span><span></span><span></span><span></span> Подсказка';
         let revealed = false;
         hint.onclick = () => {
             if (revealed) return;
             revealed = true;
             // FIX: build a LOCAL best choice from the CURRENT step using
             // the player's ACTUAL bank/extras — not the global greedy path.
-            const step = config.steps.find(s => s.id === stepId);
-            if (!step) { hint.innerHTML = '❓ Нет данных шага'; return; }
+            const step = activeSteps().find(s => s.id === stepId);
+            if (!step) { hint.innerHTML = ' Нет данных шага'; return; }
             let bestOpt = null;
+            // FIX: subtract the Year 2 reserve here too, so the hint never
+            // recommends an option that is actually disabled on screen.
+            const affordableBank = gameState.bank - currentReserve();
             for (const op of step.options) {
-                if (op.cost > gameState.bank) continue;
+                if (op.cost > affordableBank) continue;
                 if (op.conditionType >= 1 && op.conditionType <= 7 &&
                     gameState['extra' + op.conditionType] < op.requiredExtra) continue;
                 if (!bestOpt || op.scoreGain > bestOpt.scoreGain) bestOpt = op;
             }
             if (bestOpt) {
-                hint.innerHTML = `✅ Лучший вариант: «${bestOpt.text}»`;
+                hint.innerHTML = ` Лучший вариант: «${bestOpt.text}»`;
                 hint.style.color = '#03e9f4';
                 hint.style.borderColor = '#03e9f4';
             } else {
-                hint.innerHTML = '❓ Нет доступных вариантов';
+                hint.innerHTML = ' Нет доступных вариантов';
             }
             // Do NOT navigate away — just show inline.
         };
@@ -575,9 +872,16 @@
             effItem.id = 'hud-efficiency';
             hud.appendChild(effItem);
         }
-        const spent = config.settings.startingBank - gameState.bank;
+        // ── PATCH (year2): total money ever available includes the Year 2
+        // grant once it's been received, so "spent" doesn't understate itself
+        // (previously this only knew about startingBank, so once the Year 2
+        // grant was added to gameState.bank, "spent" could look artificially low).
+        const totalGranted = config.settings.startingBank + (gameState.year === 2 ? (config.settings.year2Grant || 0) : 0);
+        const spent = totalGranted - gameState.bank;
+        // FIX (year2ScoreMultiplier): gameState.visit is already weighted by
+        // each move's own year multiplier — do not multiply again here.
         const eff = spent > 0
-            ? ((gameState.visit * config.settings.scoreMultiplier) / spent).toFixed(1)
+            ? (gameState.visit / spent).toFixed(1)
             : '—';
         effItem.textContent = `КПД: ${eff} т/м`;
         effItem.title = 'Туристов на каждую потраченную монету';
@@ -593,23 +897,30 @@
             z-index:6000; overflow-y:auto; display:flex;
             align-items:flex-start; justify-content:center; padding:20px;`;
 
-        let rows = moveHistory.map((m, i) => {
+        let rows = '';
+        let lastYear = null;
+        moveHistory.forEach((m, i) => {
+            // ── PATCH: insert a "Год N" section header whenever the year changes
+            if (m.year !== lastYear) {
+                lastYear = m.year;
+                rows += `<tr><td colspan="5" style="padding:10px 4px 4px; color:#03e9f4; font-weight:700; border-bottom:1px solid #03e9f4;">Год ${lastYear || 1}</td></tr>`;
+            }
             const good = m.playerScore >= m.bestScore;
-            const icon = good ? '✅' : '❌';
+            const icon = good ? 'Да' : 'Нет';
             const diff = m.bestScore - m.playerScore;
-            return `<tr style="border-bottom:1px solid #333;">
+            rows += `<tr style="border-bottom:1px solid #333;">
                 <td style="padding:6px 4px; color:#aaa;">${i+1}</td>
                 <td style="padding:6px 4px; color:#fff; font-size:0.85rem;">${m.question.substring(0,30)}…</td>
                 <td style="padding:6px 4px; color:#03e9f4;">${m.playerChoice}</td>
                 <td style="padding:6px 4px; color:#ff9900;">${good ? '—' : m.bestChoice}</td>
                 <td style="padding:6px 4px; color:${good?'#4caf50':'#ff9900'}; font-weight:700;">${icon} ${good ? '+0' : '-'+diff}</td>
             </tr>`;
-        }).join('');
+        });
 
         overlay.innerHTML = `
             <div style="background:#141e30; border-radius:12px; padding:20px;
                         max-width:680px; width:100%; border:1px solid #03e9f4;">
-                <h2 style="color:#03e9f4; margin:0 0 16px;">📊 Разбор ходов</h2>
+                <h2 style="color:#03e9f4; margin:0 0 16px;"> Разбор ходов</h2>
                 <div style="overflow-x:auto;">
                 <table style="width:100%; border-collapse:collapse; font-size:0.85rem;">
                     <thead>
@@ -636,17 +947,40 @@
     // END INSTRUCTIONAL PATCH helpers
     // ===================================================
 
+    // ── PATCH: immediate tap feedback so a choice never feels unresponsive,
+    // especially on slower devices/connections — mark the tapped option,
+    // lock out the rest, then advance after a short, deliberate pause.
+    function selectOption(btn) {
+        const form = btn.closest('form');
+        if (form) {
+            form.querySelectorAll('.neon-btn').forEach(b => {
+                b.onclick = null;
+                if (b !== btn) b.classList.add('disabled');
+            });
+        }
+        btn.classList.add('selected');
+        setTimeout(() => handleOptionClick(btn), 220);
+    }
+
     function handleOptionClick(btn) {
         const c = parseInt(btn.dataset.cost), sg = parseInt(btn.dataset.score);
         const e1 = parseInt(btn.dataset.e1), e2 = parseInt(btn.dataset.e2), e3 = parseInt(btn.dataset.e3), e4 = parseInt(btn.dataset.e4), e5 = parseInt(btn.dataset.e5), e6 = parseInt(btn.dataset.e6), e7 = parseInt(btn.dataset.e7);
         const ns = btn.dataset.next, ct = parseInt(btn.dataset.cond), re = parseInt(btn.dataset.req);
         const thisStepId = currentStepId;
 
-        if (ns === 'final') { showFinalScreen(); return; }
+        if (ns === 'final') {
+            if (gameState.year === 1) { showYearOneEndScreen(); return; }
+            showFinalScreen(); return;
+        }
 
-        // ── PATCH: capture best score BEFORE updating state ──────────────
+        // ── PATCH: capture best score/option BEFORE updating state (uses the
+        // CURRENTLY ACTIVE year's step list, so this works for Year 2 too) ──
         const bestScoreRaw = getBestScoreForStep(thisStepId, gameState.bank, gameState) || 0;
-        const mult = config.settings.scoreMultiplier;
+        const bestOpt = getBestOptionForStep(thisStepId, gameState.bank, gameState);
+        const moveYear = gameState.year; // ── PATCH: remember which year this move happened in
+        // FIX (year2ScoreMultiplier): use the multiplier for the year the move
+        // actually happened in, not always the flat Year 1 scoreMultiplier.
+        const mult = scoreMultiplierForYear(moveYear);
 
         gameState.move += 1;
         let cm = true;
@@ -654,24 +988,27 @@
 
         let actualSg = 0;
         if (cm) {
-            gameState.bank -= c; actualSg = sg; gameState.visit += sg;
+            // FIX: accrue visit already weighted by this move's year multiplier,
+            // so Year 1 and Year 2 tourists are combined correctly instead of
+            // both being scaled by the same flat multiplier at display time.
+            gameState.bank -= c; actualSg = sg; gameState.visit += sg * mult;
             gameState.extra1 += e1; gameState.extra2 += e2; gameState.extra3 += e3; gameState.extra4 += e4;
             gameState.extra5 += e5; gameState.extra6 += e6; gameState.extra7 += e7;
         }
         saveGameState();
         updateEfficiencyHUD(); // ── PATCH: update KPD
 
-        // ── PATCH: record move for recap ─────────────────────────────────
-        const step = config.steps.find(s => s.id === thisStepId);
+        // ── PATCH: record move for recap (uses activeSteps(), not the
+        // hardcoded config.steps, so Year 2 moves are recorded correctly) ──
+        const step = activeSteps().find(s => s.id === thisStepId);
         if (step) {
-            const strat = getBestStrategy();
-            const bestEntry = strat.path.find(p => p.stepId === thisStepId);
             moveHistory.push({
+                year:         moveYear, // ── PATCH: so the recap can label/group by year
                 question:    step.question,
                 playerChoice: btn.textContent.replace(/\s+/g,' ').trim().split('.')[0],
                 playerScore:  actualSg * mult,
                 bestScore:    bestScoreRaw * mult,
-                bestChoice:   bestEntry ? bestEntry.optionText : '—'
+                bestChoice:   bestOpt ? bestOpt.text : '—'
             });
         }
 
@@ -686,7 +1023,9 @@
         clearInterval(timerInterval);
         document.getElementById('hud-container').style.display = 'none';
         const b = getLoginBox();
-        const sr = gameState.visit * config.settings.scoreMultiplier;
+        // FIX (year2ScoreMultiplier): gameState.visit already sums each move's
+        // score weighted by that move's own year multiplier.
+        const sr = gameState.visit;
 
         // ── PATCH: compute best possible score ────────────────────────────
         const bestResult = getBestStrategy();
@@ -700,7 +1039,7 @@
             <button type="button" class="neon-btn result-btn" disabled style="background:teal;color:#fff;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>Имя: ${gameState.name}</button>
             <button type="button" class="neon-btn result-btn" disabled style="background:burlywood;color:#000;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>ID: ${gameState.id}</button>
             <div class="result-tourist-box">
-                <div class="result-tourist-main">🧳 Туристов: ${sr}</div>
+                <div class="result-tourist-main"> Туристов: ${sr}</div>
                 <div class="result-tourist-sub">из максимума: ${maxSr}</div>
             </div>
             <button type="button" class="neon-btn result-btn" disabled style="background:green;color:#fff;border:none;margin-top:10px;"><span></span><span></span><span></span><span></span>Время: ${gameState.time}с</button>
@@ -715,7 +1054,7 @@
             </div>
 
             <button type="button" class="neon-btn" id="btn-recap" style="margin-top:20px; border-color:#ff9900; color:#ff9900;">
-                <span></span><span></span><span></span><span></span>📊 Разбор ходов
+                <span></span><span></span><span></span><span></span> Разбор ходов
             </button>
             <button type="button" class="neon-btn" id="btn-main-final" style="margin-top:10px;">
                 <span></span><span></span><span></span><span></span>${config.ui.finalBtnMain}
@@ -742,12 +1081,12 @@
         clearInterval(timerInterval);
         document.getElementById('hud-container').style.display = 'none';
         const b = getLoginBox();
-        b.innerHTML = `<h2 style="color:#ff4444;">${config.ui.lostTitle}</h2><p style="font-size:3vh;text-align:center;color:#fff;margin:20px 0;">${gameState.visit}</p><p style="font-size:2vh;color:#aaa;">Монет: ${gameState.bank} | Ходов: ${gameState.move + 1}/${config.steps.length}</p><form><button type="button" class="neon-btn" id="btn-restart-lost"><span></span><span></span><span></span><span></span>${config.ui.lostRestartBtn}</button></form>`;
+        b.innerHTML = `<h2 style="color:#ff4444;">${config.ui.lostTitle}</h2><p style="font-size:3vh;text-align:center;color:#fff;margin:20px 0;">${gameState.visit}</p><p style="font-size:2vh;color:#aaa;">Монет: ${gameState.bank} | Ходов: ${gameState.move + 1}/${activeSteps().length}</p><form><button type="button" class="neon-btn" id="btn-restart-lost"><span></span><span></span><span></span><span></span>${config.ui.lostRestartBtn}</button></form>`;
         document.getElementById('btn-restart-lost').onclick = () => { resetGameState(); renderMainMenu(); };
     }
 
     function createAdminToggle() {
-        const t = document.createElement('div'); t.id = 'admin-toggle'; t.innerHTML = '⚙️';
+        const t = document.createElement('div'); t.id = 'admin-toggle'; t.innerHTML = '&#8226;&#8226;&#8226;';
         t.onclick = () => {
             const p = prompt('Введите пароль администратора:');
             if (p === config.settings.adminPassword) {
@@ -763,49 +1102,51 @@
     }
 
     function renderSaveButton() {
-        ['save-btn', 'export-btn', 'reset-btn'].forEach(id => {
-            let el = document.getElementById(id); if (el) el.remove();
-        });
+        let toolbar = document.getElementById('admin-toolbar');
+        if (toolbar) toolbar.remove();
         if (isAdmin) {
-            const saveBtn = document.createElement('button'); saveBtn.id = 'save-btn'; saveBtn.textContent = '💾 Сохранить всё';
-            saveBtn.style.cssText = 'display:block;position:fixed;bottom:15px;right:80px;background:#28a745;color:#fff;border:none;padding:10px 16px;border-radius:20px;cursor:pointer;z-index:10000;font-size:.9rem;font-weight:700;touch-action:manipulation;box-shadow:0 0 10px rgba(40,167,69,0.5);';
-            saveBtn.onclick = () => { saveAdminInputs(); saveConfig(config); alert('✅ Все изменения сохранены!'); };
-            document.body.appendChild(saveBtn);
+            toolbar = document.createElement('div'); toolbar.id = 'admin-toolbar';
 
-            const exportBtn = document.createElement('button'); exportBtn.id = 'export-btn'; exportBtn.textContent = '📦 Скачать автономную версию';
-            exportBtn.style.cssText = 'display:block;position:fixed;bottom:15px;left:185px;background:#03e9f4;color:#000;border:none;padding:10px 16px;border-radius:20px;cursor:pointer;z-index:10000;font-size:.9rem;font-weight:700;touch-action:manipulation;box-shadow:0 0 10px rgba(3,233,244,0.5);';
+            const saveBtn = document.createElement('button'); saveBtn.id = 'save-btn'; saveBtn.textContent = 'Сохранить всё';
+            saveBtn.onclick = () => { saveAdminInputs(); saveConfig(config); alert('Все изменения сохранены!'); };
+            toolbar.appendChild(saveBtn);
+
+            const exportBtn = document.createElement('button'); exportBtn.id = 'export-btn'; exportBtn.textContent = 'Скачать автономную версию';
             exportBtn.onclick = () => { exportStandaloneGame(); };
-            document.body.appendChild(exportBtn);
+            toolbar.appendChild(exportBtn);
 
-            const resetBtn = document.createElement('button'); resetBtn.id = 'reset-btn'; resetBtn.textContent = '🗑️ Сбросить всё';
-            resetBtn.style.cssText = 'display:block;position:fixed;bottom:15px;left:15px;background:#ff4444;color:#fff;border:none;padding:10px 16px;border-radius:20px;cursor:pointer;z-index:10000;font-size:.9rem;font-weight:700;touch-action:manipulation;box-shadow:0 0 10px rgba(255,68,68,0.5);';
+            const resetBtn = document.createElement('button'); resetBtn.id = 'reset-btn'; resetBtn.textContent = 'Сбросить всё';
             resetBtn.onclick = () => { if (confirm("Вы уверены?")) { localStorage.removeItem('miost_config'); sessionStorage.clear(); location.reload(); } };
-            document.body.appendChild(resetBtn);
+            toolbar.appendChild(resetBtn);
+
+            document.body.appendChild(toolbar);
         }
     }
 
-    function renderAdminStepEditor(step, box) {
+    function renderAdminStepEditor(step, box, year) {
+        year = year || 1;
         let h = `<div class="nav-header">
-            <button class="nav-btn" id="btn-back-list">📋 К списку</button>
-            <button class="nav-btn" id="btn-back-home-edit">🏠 На главную</button>
+            <button class="nav-btn" id="btn-back-list"> К списку</button>
+            <button class="nav-btn" id="btn-back-home-edit"> На главную</button>
         </div>
-        <div class="admin-field" data-tooltip="Вопрос текущего шага"><input type="text" class="admin-editable" data-type="step-question" data-step="${step.id}" value="${step.question}" style="text-align:center;margin-bottom:20px;font-size:3vh;color:#03e9f4;"></div>`;
+        <div style="color:#aaa; font-size:0.8rem; margin-bottom:8px;">Год ${year}</div>
+        <div class="admin-field" data-tooltip="Вопрос текущего шага"><input type="text" class="admin-editable" data-type="step-question" data-step="${step.id}" data-year="${year}" value="${step.question}" style="text-align:center;margin-bottom:20px;font-size:3vh;color:#03e9f4;"></div>`;
         
         step.options.forEach((opt, idx) => {
             h += `
             <div class="admin-option-card" style="position:relative;">
-                <button class="admin-opt-remove" data-step="${step.id}" data-idx="${idx}" title="Удалить вариант">✕</button>
+                <button class="admin-opt-remove" data-step="${step.id}" data-idx="${idx}" data-year="${year}" title="Удалить вариант">x</button>
                 <div class="admin-option-title">Вариант ${idx+1}</div>
-                <div class="admin-field" data-tooltip="Текст кнопки"><input type="text" class="admin-editable" data-type="opt-text" data-step="${step.id}" data-idx="${idx}" value="${opt.text}" style="width:100%;margin-bottom:8px;"></div>
+                <div class="admin-field" data-tooltip="Текст кнопки"><input type="text" class="admin-editable" data-type="opt-text" data-step="${step.id}" data-idx="${idx}" data-year="${year}" value="${opt.text}" style="width:100%;margin-bottom:8px;"></div>
                 <div class="admin-params-row">
-                    <div class="admin-param" data-tooltip="Стоимость"><label>Стоимость</label><input type="number" class="admin-editable" data-type="opt-cost" data-step="${step.id}" data-idx="${idx}" value="${opt.cost}"></div>
-                    <div class="admin-param" data-tooltip="Очки"><label>Очки</label><input type="number" class="admin-editable" data-type="opt-score" data-step="${step.id}" data-idx="${idx}" value="${opt.scoreGain}"></div>
-                    ${[1,2,3,4,5,6,7].map(n => `<div class="admin-param" data-tooltip="Прибавка к E${n}"><label>E${n}</label><input type="number" class="admin-editable" data-type="opt-e${n}" data-step="${step.id}" data-idx="${idx}" value="${opt['extra'+n+'Gain']||0}"></div>`).join('')}
-                    <div class="admin-param" data-tooltip="Условие: 0=нет, 1-7=нужен E[1-7]"><label>Условие</label><input type="number" class="admin-editable" data-type="opt-cond" data-step="${step.id}" data-idx="${idx}" value="${opt.conditionType}" min="0" max="7"></div>
+                    <div class="admin-param" data-tooltip="Стоимость"><label>Стоимость</label><input type="number" class="admin-editable" data-type="opt-cost" data-step="${step.id}" data-idx="${idx}" data-year="${year}" value="${opt.cost}"></div>
+                    <div class="admin-param" data-tooltip="Очки"><label>Очки</label><input type="number" class="admin-editable" data-type="opt-score" data-step="${step.id}" data-idx="${idx}" data-year="${year}" value="${opt.scoreGain}"></div>
+                    ${[1,2,3,4,5,6,7].map(n => `<div class="admin-param" data-tooltip="Прибавка к E${n}"><label>E${n}</label><input type="number" class="admin-editable" data-type="opt-e${n}" data-step="${step.id}" data-idx="${idx}" data-year="${year}" value="${opt['extra'+n+'Gain']||0}"></div>`).join('')}
+                    <div class="admin-param" data-tooltip="Условие: 0=нет, 1-7=нужен E[1-7]"><label>Условие</label><input type="number" class="admin-editable" data-type="opt-cond" data-step="${step.id}" data-idx="${idx}" data-year="${year}" value="${opt.conditionType}" min="0" max="7"></div>
                 </div>
             </div>`;
         });
-        h += `<button class="admin-add-option" data-step="${step.id}">➕ Добавить вариант ответа</button>`;
+        h += `<button class="admin-add-option" data-step="${step.id}" data-year="${year}"> Добавить вариант ответа</button>`;
         box.innerHTML = h;
 
         // Navigation Listeners
@@ -813,14 +1154,15 @@
         document.getElementById('btn-back-home-edit').onclick = () => { saveAdminInputs(); adminViewMode = 'game'; renderMainMenu(); };
 
         box.querySelectorAll('.admin-opt-remove').forEach(btn => {
-            btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); removeOption(parseInt(btn.dataset.step), parseInt(btn.dataset.idx)); };
+            btn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); removeOption(parseInt(btn.dataset.step), parseInt(btn.dataset.idx), parseInt(btn.dataset.year)); };
         });
         const addBtn = box.querySelector('.admin-add-option');
-        if (addBtn) addBtn.onclick = (e) => { e.preventDefault(); addOption(parseInt(addBtn.dataset.step)); };
+        if (addBtn) addBtn.onclick = (e) => { e.preventDefault(); addOption(parseInt(addBtn.dataset.step), parseInt(addBtn.dataset.year)); };
     }
 
-    function addOption(stepId) {
-        const step = config.steps.find(s => s.id === stepId);
+    function addOption(stepId, year) {
+        year = year || 1;
+        const step = stepsArrayFor(year).find(s => s.id === stepId);
         if (!step) return;
         step.options.push({
             id: step.options.length + 1, text: "Новый вариант", cost: 0, scoreGain: 0,
@@ -828,18 +1170,19 @@
             conditionType: 0, requiredExtra: 0
         });
         saveConfig(config);
-        renderAdminStepEditor(step, document.querySelector('.login-box'));
+        renderAdminStepEditor(step, document.querySelector('.login-box'), year);
     }
 
-    function removeOption(stepId, idx) {
-        const step = config.steps.find(s => s.id === stepId);
+    function removeOption(stepId, idx, year) {
+        year = year || 1;
+        const step = stepsArrayFor(year).find(s => s.id === stepId);
         if (!step || step.options.length <= 1) { alert("Оставьте хотя бы один вариант!"); return; }
         const removedText = step.options[idx].text;
         if (confirm(`Удалить "${removedText}"?`)) {
             step.options.splice(idx, 1);
             step.options.forEach((opt, i) => { opt.id = i + 1; });
             saveConfig(config);
-            renderAdminStepEditor(step, document.querySelector('.login-box'));
+            renderAdminStepEditor(step, document.querySelector('.login-box'), year);
         }
     }
 
@@ -851,7 +1194,8 @@
                 else config.ui[k] = el.value; 
             } else if (el.dataset.type) {
                 const t = el.dataset.type, sid = parseInt(el.dataset.step);
-                const st = config.steps.find(s => s.id === sid);
+                const year = parseInt(el.dataset.year) || 1;
+                const st = stepsArrayFor(year).find(s => s.id === sid);
                 if (!st) return;
                 if (t === 'step-question') st.question = el.value;
                 else if (t.indexOf('opt-') === 0) {
@@ -868,25 +1212,61 @@
         });
     }
 
-    function exportStandaloneGame() {
-        // Force flush
+    // ── FIX: previously this embedded a hand-maintained duplicate copy of the
+    // whole engine as a string, which silently fell out of sync with the real
+    // game (it had no Year 2 support at all). Instead, this now fetches the
+    // ACTUAL live files (style.css, config-default.js, smtp.js, app.js) and
+    // bundles them as-is, so the export can never go stale again. The only
+    // thing swapped in is the current (possibly admin-edited) config, in
+    // place of config-default.js's built-in DEFAULT_CONFIG.
+    async function exportStandaloneGame() {
         saveAdminInputs();
-        
-        const css = `:root{--bg-dark:#141e30;--bg-light:#243b55;--neon-blue:#03e9f4;--glass-bg:rgba(0,0,0,.5);--text-white:#fff;--font-main:sans-serif}*{box-sizing:border-box;outline:none;-webkit-tap-highlight-color:transparent}html,body{height:100%;margin:0;padding:0;font-family:var(--font-main);background:linear-gradient(var(--bg-dark),var(--bg-light));overflow-x:hidden;color:var(--text-white);-webkit-text-size-adjust:100%}#hud-container{position:fixed;top:10px;left:0;width:100%;display:flex;justify-content:space-between;padding:0 15px;z-index:1000;pointer-events:none}.hud-item{background:rgba(0,0,0,.6);padding:8px 12px;border-radius:6px;font-size:clamp(.85rem,4vw,1.3rem);font-weight:700;border:1px solid var(--neon-blue);box-shadow:0 0 8px var(--neon-blue);white-space:nowrap}.login-box{position:absolute;top:50%;left:50%;width:92%;max-width:700px;padding:30px 20px;transform:translate(-50%,-50%);background:var(--glass-bg);box-shadow:0 15px 25px rgba(0,0,0,.6);border-radius:12px;text-align:center;z-index:10;max-height:90vh;overflow-y:auto;-webkit-overflow-scrolling:touch}.login-box h2{margin:0 0 20px;font-size:clamp(1.4rem,6vw,2.8rem);color:#fff;text-align:center}.login-box p{margin:10px 0 20px;padding:0;color:#fff;font-size:clamp(1rem,4vw,1.6rem);text-align:left;line-height:1.5}.login-box form{display:flex;flex-direction:column;gap:16px;align-items:center}.user-box{position:relative;width:100%;margin-bottom:16px}.user-box input{width:100%;padding:12px 0;font-size:16px;color:#fff;margin-bottom:20px;border:none;border-bottom:1px solid #fff;background:0 0;transition:.3s}.user-box label{position:absolute;top:0;left:0;padding:12px 0;font-size:16px;color:#fff;pointer-events:none;transition:.5s}.user-box input:focus~label,.user-box input:valid~label{top:-20px;left:0;color:var(--neon-blue);font-size:.9rem}.neon-btn{position:relative;display:block;width:100%;min-height:48px;padding:12px 16px;color:var(--neon-blue);font-size:clamp(.95rem,3.5vw,1.3rem);text-decoration:none;text-transform:uppercase;overflow:hidden;transition:.3s;margin-top:10px;letter-spacing:1px;border:1px solid rgba(255,255,255,.2);text-align:center;cursor:pointer;background:0 0;font-family:var(--font-main);border-radius:6px;touch-action:manipulation}.neon-btn:hover{background:var(--neon-blue);color:#000;box-shadow:0 0 12px var(--neon-blue);border-color:var(--neon-blue)}.neon-btn:active{transform:scale(.98);opacity:.9}.neon-btn span{position:absolute;display:block}.neon-btn span:nth-child(1){top:0;left:-100%;width:100%;height:2px;background:linear-gradient(90deg,transparent,var(--neon-blue));animation:btn-anim1 1s linear infinite}@keyframes btn-anim1{0%{left:-100%}50%,100%{left:100%}}.neon-btn span:nth-child(2){top:-100%;right:0;width:2px;height:100%;background:linear-gradient(180deg,transparent,var(--neon-blue));animation:btn-anim2 1s linear infinite;animation-delay:.25s}@keyframes btn-anim2{0%{top:-100%}50%,100%{top:100%}}.neon-btn span:nth-child(3){bottom:0;right:-100%;width:100%;height:2px;background:linear-gradient(270deg,transparent,var(--neon-blue));animation:btn-anim3 1s linear infinite;animation-delay:.5s}@keyframes btn-anim3{0%{right:-100%}50%,100%{right:100%}}.neon-btn span:nth-child(4){bottom:-100%;left:0;width:2px;height:100%;background:linear-gradient(360deg,transparent,var(--neon-blue));animation:btn-anim4 1s linear infinite;animation-delay:.75s}@keyframes btn-anim4{0%{bottom:-100%}50%,100%{bottom:100%}}.neon-btn.disabled{opacity:.35;pointer-events:none;filter:grayscale(.8);color:#444;border-color:#333}.admin-editable{width:100%;padding:8px;border-radius:4px;background:rgba(255,255,255,.1);border:1px dashed #555;color:#fff!important;font-weight:700;transition:.2s;text-align:center}.admin-editable:focus{border-color:var(--neon-blue);background:rgba(3,233,244,.15)}#admin-toggle{position:fixed;bottom:15px;right:15px;font-size:22px;color:rgba(255,255,255,.4);cursor:pointer;z-index:9999;background:rgba(0,0,0,.6);width:46px;height:46px;border-radius:50%;display:flex;align-items:center;justify-content:center;border:1px solid #555;touch-action:manipulation}#admin-toggle:hover{color:var(--neon-blue);transform:rotate(90deg)}#save-btn{display:none;position:fixed;bottom:15px;right:75px;background:#28a745;color:#fff;border:none;padding:10px 16px;border-radius:20px;cursor:pointer;z-index:10000;font-size:.9rem;font-weight:700;touch-action:manipulation}.admin-field{position:relative;flex:1;min-width:0}.admin-field[data-tooltip]::after{content:attr(data-tooltip);position:absolute;bottom:calc(100% + 5px);left:50%;transform:translateX(-50%);background:#000;color:var(--neon-blue);padding:5px 8px;border-radius:4px;font-size:.7rem;white-space:nowrap;opacity:0;pointer-events:none;transition:.2s;border:1px solid var(--neon-blue);z-index:9999;box-shadow:0 4px 8px rgba(0,0,0,.5)}.admin-field[data-tooltip]:hover::after{opacity:1}.admin-option-card{border:1px solid #444;padding:12px;margin-bottom:12px;border-radius:6px;background:rgba(0,0,0,.4);text-align:left;position:relative}.admin-option-title{font-size:.85rem;color:#aaa;margin-bottom:5px;text-transform:uppercase;letter-spacing:1px}.admin-params-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}.admin-param{flex:1 1 50px;display:flex;flex-direction:column;min-width:50px;position:relative}.admin-param label{font-size:.7rem;color:#888;margin-bottom:3px;text-align:center}.admin-param input{width:100%;padding:5px 2px;text-align:center;font-size:.85rem;background:rgba(255,255,255,.1);border:1px solid #555;color:#fff;border-radius:3px}.admin-param input:focus{border-color:var(--neon-blue);background:rgba(3,233,244,.1)}.admin-opt-remove{position:absolute;top:8px;right:8px;background:#ff4444;color:#fff;border:none;width:22px;height:22px;border-radius:50%;cursor:pointer;font-size:14px;line-height:1;display:flex;align-items:center;justify-content:center;transition:.2s;z-index:2}.admin-opt-remove:hover{background:#cc0000;transform:scale(1.1)}.admin-add-option{width:100%;padding:10px;margin-top:10px;background:rgba(3,233,244,.1);border:1px dashed var(--neon-blue);color:var(--neon-blue);border-radius:6px;cursor:pointer;font-size:.9rem;font-weight:700;transition:.2s}.admin-add-option:hover{background:rgba(3,233,244,.2)}.nav-header{display:flex;justify-content:space-between;gap:10px;margin-bottom:20px;}.nav-btn{background:#444;color:#fff;border:none;padding:8px 12px;border-radius:6px;cursor:pointer;font-size:0.9rem;touch-action:manipulation;}.nav-btn:hover{background:#555;}.admin-scroll-list{max-height:60vh;overflow-y:auto;margin-bottom:10px;}.move-btn{background:none;border:none;color:#03e9f4;font-size:1.2rem;cursor:pointer;padding:0 5px;}.move-btn:hover{color:#fff;}.move-btn:disabled{opacity:0.3;cursor:default;}@media (max-width:480px){.login-box{width:96%;padding:20px 15px;max-height:92vh}.hud-item{padding:6px 10px;font-size:.85rem}#hud-container{top:8px}.user-box input{font-size:16px}}`;
-        
-        const configJSON = JSON.stringify(config).replace(/<\/script>/gi, '<\\/script>');
-        
-        // Note: For a complete export, the 'engine' string must be updated with the new logic.
-        // In a real development environment, this would be automated.
-        // For now, the export will contain the logic up to this point.
-        // We construct a minimal engine string to make sure it runs.
-        const engine = '(function(){"use strict";var config='+configJSON+';var gameState={move:0,bank:150,visit:0,time:0,extra1:0,extra2:0,extra3:0,extra4:0,extra5:0,extra6:0,extra7:0,id:null,name:"",phone:""};var isAdmin=false,timerInterval=null,currentStepId=null,adminViewMode="game";document.addEventListener("DOMContentLoaded",function(){initSession();createPersistentHUD();startTimer();createAdminToggle();renderMainMenu();document.addEventListener("input",function(e){if(e.target.classList.contains("admin-editable"))saveAdminInputs();});});function initSession(){if(!sessionStorage.getItem("id")){gameState.id=Math.floor(Math.random()*9e5)+1e5;sessionStorage.setItem("id",gameState.id);["move","bank","visit","time"].forEach(function(k){sessionStorage.setItem(k,gameState[k]);});for(var i=1;i<=7;i++)sessionStorage.setItem("extra"+i,gameState["extra"+i]);}else{["move","bank","visit","time"].forEach(function(k){gameState[k]=parseInt(sessionStorage.getItem(k))||gameState[k];});for(var i=1;i<=7;i++)gameState["extra"+i]=parseInt(sessionStorage.getItem("extra"+i))||0;gameState.id=sessionStorage.getItem("id");gameState.name=sessionStorage.getItem("name")||"";gameState.phone=sessionStorage.getItem("phone")||"";}}function saveGameState(){["move","bank","visit","time"].forEach(function(k){sessionStorage.setItem(k,gameState[k]);});for(var i=1;i<=7;i++)sessionStorage.setItem("extra"+i,gameState["extra"+i]);updateHUD();}function resetGameState(){gameState.move=0;gameState.bank=config.settings.startingBank;gameState.visit=0;gameState.time=0;for(var i=1;i<=7;i++)gameState["extra"+i]=0;["move","bank","visit","time"].forEach(function(k){sessionStorage.setItem(k,gameState[k]);});for(var i=1;i<=7;i++)sessionStorage.setItem("extra"+i,0);updateHUD();}function createPersistentHUD(){var h=document.getElementById("hud-container");if(!h){h=document.createElement("div");h.id="hud-container";h.innerHTML="<div class=\\"hud-item\\" id=\\"hud-score\\">Монет: "+gameState.bank+"</div><div class=\\"hud-item\\" id=\\"hud-move\\">Месяц: "+(gameState.move+1)+"/"+config.steps.length+"</div>";document.body.prepend(h);}}function updateHUD(){var s=document.getElementById("hud-score"),m=document.getElementById("hud-move");if(s)s.textContent="Монет: "+gameState.bank;if(m)m.textContent="Месяц: "+(gameState.move+1)+"/"+config.steps.length;}function startTimer(){if(timerInterval)clearInterval(timerInterval);timerInterval=setInterval(function(){gameState.time++;sessionStorage.setItem("time",gameState.time);},1000);}function checkLoseCondition(){if(gameState.move>config.steps.length){gameState.visit="0. Превышено число ходов!";showLostScreen();return true;}if(gameState.bank<0){gameState.visit="0. Превышен бюджет!";showLostScreen();return true;}return false;}function getLoginBox(){var b=document.querySelector(".login-box");if(!b){b=document.createElement("div");b.className="login-box";document.body.appendChild(b);}return b;}function renderMainMenu(){if(checkLoseCondition())return;currentStepId=null;document.getElementById("hud-container").style.display="none";var b=getLoginBox();if(isAdmin&&adminViewMode==="list"){var html="<div class=\\"nav-header\\"><button class=\\"nav-btn\\" id=\\"btn-back-home\\">🏠 На главную</button><h2 style=\\"color:#03e9f4;margin:10px 0;\\">Вопросы ("+config.steps.length+")</h2></div><div class=\\"admin-scroll-list\\" >";config.steps.forEach(function(step,idx){var isTop=(idx===0);var isBottom=(idx===config.steps.length-1);html+="<div class=\\"admin-option-card\\" style=\\"margin-bottom:10px;padding:10px;border:1px solid #444;border-radius:6px;display:flex;justify-content:space-between;align-items:center;\\"><div><strong style=\\"color:#03e9f4;\\">#"+step.id+": "+step.question.substring(0,30)+"...</strong><br><small style=\\"color:#aaa;\\">Вариантов: "+step.options.length+"</small></div><div style=\\"display:flex;gap:5px;align-items:center;\\"><button class=\\"move-btn\\" onclick=\\"window.moveQuestion("+idx+",\'up\')\\" "+(isTop?"disabled":"")+" title=\\"Вверх\\">▲</button><button class=\\"move-btn\\" onclick=\\"window.moveQuestion("+idx+",\'down\')\\" "+(isBottom?"disabled":"")+" title=\\"Вниз\\">▼</button><button class=\\"neon-btn\\" style=\\"width:auto;padding:5px 10px;font-size:0.8rem;\\" onclick=\\"editQuestion("+step.id+")\\">✏️</button><button class=\\"neon-btn\\" style=\\"width:auto;padding:5px 10px;font-size:0.8rem;background:#ff4444;\\" onclick=\\"deleteQuestion("+step.id+")\\">🗑️</button></div></div>"});html+="</div><button class=\\"neon-btn\\" id=\\"btn-add-question\\" style=\\"margin-top:15px;border:1px dashed var(--neon-blue);background:rgba(3,233,244,0.1);\\"><span></span><span></span><span></span><span></span>➕ Добавить вопрос</button>";b.innerHTML=html;document.getElementById("btn-back-home").onclick=function(){adminViewMode="game";renderMainMenu();};document.getElementById("btn-add-question").onclick=function(){addQuestion();};}else if(isAdmin&&adminViewMode==="game"){b.innerHTML="<div class=\\"admin-field\\" data-tooltip=\\"Главный заголовок\\"><input type=\\"text\\" class=\\"admin-editable\\" data-ui=\\"mainTitle\\" value=\\""+config.ui.mainTitle+"\\" style=\\"font-size:clamp(1.5rem, 5vw, 3rem); text-align:center; margin-bottom:20px; color:#03e9f4;\\"></div><form><button type=\\"button\\" class=\\"neon-btn\\" id=\\"btn-start\\"><span></span><span></span><span></span><span></span><span class=\\"btn-text\\">"+config.ui.startBtn+"</span></button><button type=\\"button\\" class=\\"neon-btn\\" id=\\"btn-rules\\"><span></span><span></span><span></span><span></span><span class=\\"btn-text\\">"+config.ui.rulesBtn+"</span></button></form><div class=\\"admin-field\\" data-tooltip=\\"Подзаголовок\\"><input type=\\"text\\" class=\\"admin-editable\\" data-ui=\\"mainSubtitle\\" value=\\""+config.ui.mainSubtitle+"\\" style=\\"font-size:clamp(1.5rem, 5vw, 3rem); text-align:center; margin-top:20px; color:#03e9f4;\\"></div><button class=\\"nav-btn\\" id=\\"btn-manage-questions\\">📋 Управление вопросами</button>";document.getElementById("btn-start").onclick=renderRegistration;document.getElementById("btn-rules").onclick=renderRules;document.getElementById("btn-manage-questions").onclick=function(){adminViewMode="list";renderMainMenu();};}else{b.innerHTML="<h2>"+config.ui.mainTitle+"</h2><form><button type=\\"button\\" class=\\"neon-btn\\" id=\\"btn-start\\"><span></span><span></span><span></span><span></span>"+config.ui.startBtn+"</button><button type=\\"button\\" class=\\"neon-btn\\" id=\\"btn-rules\\"><span></span><span></span><span></span><span></span>"+config.ui.rulesBtn+"</button></form><h2>"+config.ui.mainSubtitle+"</h2>";document.getElementById("btn-start").onclick=renderRegistration;document.getElementById("btn-rules").onclick=renderRules;}}function renderRegistration(){var b=getLoginBox();b.innerHTML="<h2>"+config.ui.regTitle+"</h2><form><div class=\\"user-box\\"><input type=\\"text\\" id=\\"input-name\\" required value=\\""+gameState.name+"\\"><label>"+config.ui.regName+"</label></div><div class=\\"user-box\\"><input type=\\"text\\" id=\\"input-phone\\" required value=\\""+gameState.phone+"\\"><label>"+config.ui.regPhone+"</label></div><h4>"+config.ui.regNote+"</h4><button type=\\"button\\" class=\\"neon-btn\\" id=\\"btn-reg-start\\"><span></span><span></span><span></span><span></span>"+config.ui.regBtn+"</button></form>";document.getElementById("btn-reg-start").onclick=function(){gameState.name=document.getElementById("input-name").value||"Аноним";gameState.phone=document.getElementById("input-phone").value||"Не указан";sessionStorage.setItem("name",gameState.name);sessionStorage.setItem("phone",gameState.phone);document.getElementById("hud-container").style.display="flex";loadGameStep(1);};}function renderRules(){var b=getLoginBox();b.innerHTML=config.ui.rulesText.map(function(t){return"<p>"+t+"</p>";}).join("")+"<form><button type=\\"button\\" class=\\"nav-btn\\" id=\\"btn-back-rules\\">🔙 Назад</button></form>";document.getElementById("btn-back-rules").onclick=function(){adminViewMode="game";renderMainMenu();};}function loadGameStep(id){if(checkLoseCondition())return;currentStepId=id;var step=config.steps.find(function(s){return s.id===id;});if(!step){if(id>config.steps.length){showFinalScreen();return;}loadGameStep(Math.max(1,id-1));return;}var b=getLoginBox();document.getElementById("hud-container").style.display="flex";if(isAdmin){renderAdminStepEditor(step,b);}else{var q="<p id=\\"questt\\" style=\\"font-size:3vh;text-align:left;margin-bottom:30px\\">"+step.question+"</p>";var o="";step.options.forEach(function(op){var c=true,m="";if(op.conditionType>=1&&op.conditionType<=7&&gameState["extra"+op.conditionType]<op.requiredExtra){c=false;m=" (требуется: E"+op.conditionType+"≥"+op.requiredExtra+")";}o+="<button type=\\"button\\" class=\\"neon-btn "+(c?"":"disabled")+"\\" data-cost=\\""+op.cost+"\\" data-score=\\""+op.scoreGain+"\\" data-e1=\\""+(op.extra1Gain||0)+"\\" data-e2=\\""+(op.extra2Gain||0)+"\\" data-e3=\\""+(op.extra3Gain||0)+"\\" data-e4=\\""+(op.extra4Gain||0)+"\\" data-e5=\\""+(op.extra5Gain||0)+"\\" data-e6=\\""+(op.extra6Gain||0)+"\\" data-e7=\\""+(op.extra7Gain||0)+"\\" data-cond=\\""+op.conditionType+"\\" data-req=\\""+op.requiredExtra+"\\" data-next=\\""+step.nextStep+"\\" "+(c?"":"disabled")+"><span></span><span></span><span></span><span></span>"+op.text+". Стоимость: "+op.cost+m+"</button>";});b.innerHTML=q+"<form>"+o+"</form>";var btns=b.querySelectorAll(".neon-btn:not(.disabled)");for(var i=0;i<btns.length;i++){(function(btn){btn.onclick=function(){handleOptionClick(btn);};})(btns[i]);}}updateHUD();}function handleOptionClick(btn){var c=parseInt(btn.dataset.cost),sg=parseInt(btn.dataset.score);var e1=parseInt(btn.dataset.e1),e2=parseInt(btn.dataset.e2),e3=parseInt(btn.dataset.e3),e4=parseInt(btn.dataset.e4),e5=parseInt(btn.dataset.e5),e6=parseInt(btn.dataset.e6),e7=parseInt(btn.dataset.e7);var ns=btn.dataset.next,ct=parseInt(btn.dataset.cond),re=parseInt(btn.dataset.req);if(ns==="final"){showFinalScreen();return;}gameState.move+=1;var cm=true;if(ct>=1&&ct<=7&&gameState["extra"+ct]<re)cm=false;if(cm){gameState.bank-=c;gameState.visit+=sg;gameState.extra1+=e1;gameState.extra2+=e2;gameState.extra3+=e3;gameState.extra4+=e4;gameState.extra5+=e5;gameState.extra6+=e6;gameState.extra7+=e7;}saveGameState();if(checkLoseCondition())return;loadGameStep(parseInt(ns));}function showFinalScreen(){clearInterval(timerInterval);document.getElementById("hud-container").style.display="none";var b=getLoginBox();var sr=gameState.visit*config.settings.scoreMultiplier;if(typeof Email!=="undefined"){try{Email.send("miostvvguproject@mail.ru","miostvvguproject@mail.ru","Результат:"+sr+"; Имя:"+gameState.name+"; Телефон:"+gameState.phone+"; Время:"+gameState.time+"; Айди:"+gameState.id,"this is the body","smtp.mail.ru","miostvvguproject@mail.ru","HKWxL9y5TnFMhFGrZFWd");}catch(e){}}b.innerHTML="<h2 style=\\"color:#03e9f4;\\">"+config.ui.finalTitle+"</h2><button type=\\"button\\" class=\\"neon-btn result-btn\\" disabled style=\\"background:teal;color:#fff;border:none;margin-top:10px;\\"><span></span><span></span><span></span><span></span>Имя: "+gameState.name+"</button><button type=\\"button\\" class=\\"neon-btn result-btn\\" disabled style=\\"background:burlywood;color:#000;border:none;margin-top:10px;\\"><span></span><span></span><span></span><span></span>ID: "+gameState.id+"</button><button type=\\"button\\" class=\\"neon-btn result-btn\\" disabled style=\\"background:mediumslateblue;color:#fff;border:none;margin-top:10px;\\"><span></span><span></span><span></span><span></span>Туристов: "+sr+"</button><button type=\\"button\\" class=\\"neon-btn result-btn\\" disabled style=\\"background:green;color:#fff;border:none;margin-top:10px;\\"><span></span><span></span><span></span><span></span>Время: "+gameState.time+"с</button><button type=\\"button\\" class=\\"neon-btn\\" id=\\"btn-main-final\\" style=\\"margin-top:30px;\\"><span></span><span></span><span></span><span></span>"+config.ui.finalBtnMain+"</button>";document.getElementById("btn-main-final").onclick=function(){resetGameState();renderMainMenu();};}function showLostScreen(){clearInterval(timerInterval);document.getElementById("hud-container").style.display="none";var b=getLoginBox();b.innerHTML="<h2 style=\\"color:#ff4444;\\">"+config.ui.lostTitle+"</h2><p style=\\"font-size:3vh;text-align:center;color:#fff;margin:20px 0;\\">"+gameState.visit+"</p><p style=\\"font-size:2vh;color:#aaa;\\">Монет: "+gameState.bank+" | Ходов: "+(gameState.move+1)+"/"+config.steps.length+"</p><form><button type=\\"button\\" class=\\"neon-btn\\" id=\\"btn-restart-lost\\"><span></span><span></span><span></span><span></span>"+config.ui.lostRestartBtn+"</button></form>";document.getElementById("btn-restart-lost").onclick=function(){resetGameState();renderMainMenu();};}function createAdminToggle(){var t=document.createElement("div");t.id="admin-toggle";t.innerHTML="⚙️";t.onclick=function(){var p=prompt("Введите пароль администратора:");if(p===config.settings.adminPassword){isAdmin=!isAdmin;t.style.color=isAdmin?"#03e9f4":"rgba(255,255,255,0.3)";t.style.borderColor=isAdmin?"#03e9f4":"#444";t.style.boxShadow=isAdmin?"0 0 10px #03e9f4":"none";renderSaveButton();if(currentStepId)loadGameStep(currentStepId);else renderMainMenu();}else if(p!==null)alert("Неверный пароль");};document.body.appendChild(t);}function renderSaveButton(){["save-btn","export-btn","reset-btn"].forEach(function(id){var el=document.getElementById(id);if(el)el.remove();});if(isAdmin){var saveBtn=document.createElement("button");saveBtn.id="save-btn";saveBtn.textContent="💾 Сохранить всё";saveBtn.style.cssText="display:block;position:fixed;bottom:15px;right:80px;background:#28a745;color:#fff;border:none;padding:10px 16px;border-radius:20px;cursor:pointer;z-index:10000;font-size:.9rem;font-weight:700;touch-action:manipulation;box-shadow:0 0 10px rgba(40,167,69,0.5);";saveBtn.onclick=function(){saveAdminInputs();saveConfig(config);alert("✅ Все изменения сохранены!");};document.body.appendChild(saveBtn);var exportBtn=document.createElement("button");exportBtn.id="export-btn";exportBtn.textContent="📦 Скачать автономную версию";exportBtn.style.cssText="display:block;position:fixed;bottom:15px;left:185px;background:#03e9f4;color:#000;border:none;padding:10px 16px;border-radius:20px;cursor:pointer;z-index:10000;font-size:.9rem;font-weight:700;touch-action:manipulation;box-shadow:0 0 10px rgba(3,233,244,0.5);";exportBtn.onclick=function(){exportStandaloneGame();};document.body.appendChild(exportBtn);var resetBtn=document.createElement("button");resetBtn.id="reset-btn";resetBtn.textContent="🗑️ Сбросить всё";resetBtn.style.cssText="display:block;position:fixed;bottom:15px;left:15px;background:#ff4444;color:#fff;border:none;padding:10px 16px;border-radius:20px;cursor:pointer;z-index:10000;font-size:.9rem;font-weight:700;touch-action:manipulation;box-shadow:0 0 10px rgba(255,68,68,0.5);";resetBtn.onclick=function(){if(confirm("Вы уверены?")){localStorage.removeItem("miost_config");sessionStorage.clear();location.reload();}};document.body.appendChild(resetBtn);}}function renderAdminStepEditor(step,box){var h="<div class=\\"nav-header\\"><button class=\\"nav-btn\\" id=\\"btn-back-list\\">📋 К списку</button><button class=\\"nav-btn\\" id=\\"btn-back-home-edit\\">🏠 На главную</button></div><div class=\\"admin-field\\" data-tooltip=\\"Вопрос текущего шага\\"><input type=\\"text\\" class=\\"admin-editable\\" data-type=\\"step-question\\" data-step=\\""+step.id+"\\" value=\\""+step.question+"\\" style=\\"text-align:center;margin-bottom:20px;font-size:3vh;color:#03e9f4;\\"></div>";step.options.forEach(function(opt,idx){h+="<div class=\\"admin-option-card\\" style=\\"position:relative;\\"><button class=\\"admin-opt-remove\\" data-step=\\""+step.id+"\\" data-idx=\\""+idx+"\\" title=\\"Удалить вариант\\">✕</button><div class=\\"admin-option-title\\">Вариант "+(idx+1)+"</div><div class=\\"admin-field\\" data-tooltip=\\"Текст кнопки\\"><input type=\\"text\\" class=\\"admin-editable\\" data-type=\\"opt-text\\" data-step=\\""+step.id+"\\" data-idx=\\""+idx+"\\" value=\\""+opt.text+"\\" style=\\"width:100%;margin-bottom:8px;\\"></div><div class=\\"admin-params-row\\"><div class=\\"admin-param\\" data-tooltip=\\"Стоимость\\"><label>Стоимость</label><input type=\\"number\\" class=\\"admin-editable\\" data-type=\\"opt-cost\\" data-step=\\""+step.id+"\\" data-idx=\\""+idx+"\\" value=\\""+opt.cost+"\\"></div><div class=\\"admin-param\\" data-tooltip=\\"Очки\\"><label>Очки</label><input type=\\"number\\" class=\\"admin-editable\\" data-type=\\"opt-score\\" data-step=\\""+step.id+"\\" data-idx=\\""+idx+"\\" value=\\""+opt.scoreGain+"\\"></div>";for(var n=1;n<=7;n++){h+="<div class=\\"admin-param\\" data-tooltip=\\"Прибавка к E"+n+"\\"><label>E"+n+"</label><input type=\\"number\\" class=\\"admin-editable\\" data-type=\\"opt-e"+n+"\\" data-step=\\""+step.id+"\\" data-idx=\\""+idx+"\\" value=\\""+(opt["extra"+n+"Gain"]||0)+"\\"></div>";}h+="<div class=\\"admin-param\\" data-tooltip=\\"Условие: 0=нет, 1-7=нужен E[1-7]\\"><label>Условие</label><input type=\\"number\\" class=\\"admin-editable\\" data-type=\\"opt-cond\\" data-step=\\""+step.id+"\\" data-idx=\\""+idx+"\\" value=\\""+opt.conditionType+"\\" min=\\"0\\" max=\\"7\\"></div></div></div>";});h+="<button class=\\"admin-add-option\\" data-step=\\""+step.id+"\\">➕ Добавить вариант ответа</button>";box.innerHTML=h;document.getElementById("btn-back-list").onclick=function(){saveAdminInputs();adminViewMode="list";renderMainMenu();};document.getElementById("btn-back-home-edit").onclick=function(){saveAdminInputs();adminViewMode="game";renderMainMenu();};box.querySelectorAll(".admin-opt-remove").forEach(function(btn){btn.onclick=function(e){e.preventDefault();e.stopPropagation();removeOption(parseInt(btn.dataset.step),parseInt(btn.dataset.idx));};});var addBtn=box.querySelector(".admin-add-option");if(addBtn)addBtn.onclick=function(e){e.preventDefault();addOption(parseInt(addBtn.dataset.step));};}function addOption(stepId){var step=config.steps.find(function(s){return s.id===stepId;});if(!step)return;step.options.push({id:step.options.length+1,text:"Новый вариант",cost:0,scoreGain:0,extra1Gain:0,extra2Gain:0,extra3Gain:0,extra4Gain:0,extra5Gain:0,extra6Gain:0,extra7Gain:0,conditionType:0,requiredExtra:0});saveConfig(config);renderAdminStepEditor(step,document.querySelector(".login-box"));}function removeOption(stepId,idx){var step=config.steps.find(function(s){return s.id===stepId;});if(!step||step.options.length<=1){alert("Оставьте хотя бы один вариант!");return;}var removedText=step.options[idx].text;if(confirm("Удалить вариант \\""+removedText+"\\"?")){step.options.splice(idx,1);step.options.forEach(function(opt,i){opt.id=i+1;});saveConfig(config);renderAdminStepEditor(step,document.querySelector(".login-box"));;}}function saveAdminInputs(){var inputs=document.querySelectorAll(".admin-editable");for(var i=0;i<inputs.length;i++){var el=inputs[i];if(el.dataset.ui){var k=el.dataset.ui;if(el.tagName==="TEXTAREA")config.ui[k]=el.value.split("\\n").filter(function(l){return l.trim()!=="";});else config.ui[k]=el.value;}else if(el.dataset.type){var t=el.dataset.type,sid=parseInt(el.dataset.step);var st=config.steps.find(function(s){return s.id===sid;});if(!st)return;if(t==="step-question")st.question=el.value;else if(t.indexOf("opt-")===0){var idx=parseInt(el.dataset.idx);if(!st.options[idx])return;var op=st.options[idx];if(t==="opt-text")op.text=el.value;else if(t==="opt-cost")op.cost=parseInt(el.value)||0;else if(t==="opt-score")op.scoreGain=parseInt(el.value)||0;else if(t==="opt-cond")op.conditionType=parseInt(el.value)||0;else{var m=t.match(/^opt-e(\\d+)$/);if(m)op["extra"+m[1]+"Gain"]=parseInt(el.value)||0;}}}}}window.editQuestion=function(stepId){currentStepId=stepId;adminViewMode="edit";loadGameStep(stepId);};window.deleteQuestion=function(stepId){if(config.steps.length<=1){alert("Нельзя удалить последний вопрос!");return;}if(confirm("Удалить этот вопрос? Игра будет автоматически перестроена.")){config.steps=config.steps.filter(function(s){return s.id!==stepId;});relinkQuestions();renderMainMenu();}};window.addQuestion=function(){var newId=config.steps.length>0?Math.max.apply(Math,config.steps.map(function(s){return s.id;}))+1:1;config.steps.push({id:newId,question:"Новый вопрос",options:[{id:1,text:"Вариант 1",cost:0,scoreGain:0,extra1Gain:0,extra2Gain:0,extra3Gain:0,extra4Gain:0,extra5Gain:0,extra6Gain:0,extra7Gain:0,conditionType:0,requiredExtra:0},{id:2,text:"Вариант 2",cost:0,scoreGain:0,extra1Gain:0,extra2Gain:0,extra3Gain:0,extra4Gain:0,extra5Gain:0,extra6Gain:0,extra7Gain:0,conditionType:0,requiredExtra:0},{id:3,text:"Вариант 3",cost:0,scoreGain:0,extra1Gain:0,extra2Gain:0,extra3Gain:0,extra4Gain:0,extra5Gain:0,extra6Gain:0,extra7Gain:0,conditionType:0,requiredExtra:0},{id:4,text:"Вариант 4",cost:0,scoreGain:0,extra1Gain:0,extra2Gain:0,extra3Gain:0,extra4Gain:0,extra5Gain:0,extra6Gain:0,extra7Gain:0,conditionType:0,requiredExtra:0}],nextStep:"final"});relinkQuestions();editQuestion(newId);};function relinkQuestions(){for(var i=0;i<config.steps.length;i++){config.steps[i].id=i+1;config.steps[i].nextStep=(i===config.steps.length-1)?"final":(i+2);}saveConfig(config);}window.moveQuestion=function(index,direction){if(direction==="up"&&index>0){var temp=config.steps[index];config.steps[index]=config.steps[index-1];config.steps[index-1]=temp;relinkQuestions();renderAdminQuestionList(getLoginBox());}else if(direction==="down"&&index<config.steps.length-1){var temp=config.steps[index];config.steps[index]=config.steps[index+1];config.steps[index+1]=temp;relinkQuestions();renderAdminQuestionList(getLoginBox());}};})();';
 
-        const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>МИОСТ ВВГУ - Compiled</title><style>${css}</style></head><body><div class="login-box"></div><script>${engine}<\/script></body></html>`;
+        let cssText, configDefaultText, smtpText, appText;
+        try {
+            [cssText, configDefaultText, smtpText, appText] = await Promise.all([
+                fetch('style.css').then(r => { if (!r.ok) throw new Error('style.css: ' + r.status); return r.text(); }),
+                fetch('config-default.js').then(r => { if (!r.ok) throw new Error('config-default.js: ' + r.status); return r.text(); }),
+                fetch('smtp.js').then(r => { if (!r.ok) throw new Error('smtp.js: ' + r.status); return r.text(); }),
+                fetch('app.js').then(r => { if (!r.ok) throw new Error('app.js: ' + r.status); return r.text(); })
+            ]);
+        } catch (err) {
+            alert('Не удалось собрать автономную версию: ' + err.message + '\n\nЭта функция требует, чтобы игра была запущена через локальный сервер (например: python -m http.server 8000), а не просто открыта двойным кликом — иначе браузер блокирует чтение файлов игры (ошибка CORS на file://).');
+            return;
+        }
+
+        // Swap config-default.js's built-in DEFAULT_CONFIG for the CURRENT
+        // (possibly admin-edited) config, keeping its helper functions
+        // (cloneConfig/loadConfig/saveConfig) untouched and functional.
+        const splitMarker = '// Helper: Deep clone config for safe editing';
+        const splitIdx = configDefaultText.indexOf(splitMarker);
+        const configJSON = JSON.stringify(config).replace(/<\/script>/gi, '<\\/script>');
+        const configDefaultOut = splitIdx === -1
+            ? `const DEFAULT_CONFIG = ${configJSON};\n`
+            : `const DEFAULT_CONFIG = ${configJSON};\n\n${configDefaultText.slice(splitIdx)}`;
+
+        const title = (config.ui && config.ui.mainSubtitle) ? config.ui.mainSubtitle : 'ТГРБ ВВГУ';
+        const html = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>${title} - Compiled</title>
+<style>${cssText}</style>
+</head>
+<body>
+<div class="login-box"></div>
+<script>${configDefaultOut}<\/script>
+<script>${smtpText}<\/script>
+<script>${appText}<\/script>
+</body>
+</html>`;
+
         const blob = new Blob([html], {type: 'text/html'});
         const url = URL.createObjectURL(blob);
-        const a = document.createElement('a'); a.href = url; a.download = 'miost_compiled_standalone.html';
+        const a = document.createElement('a'); a.href = url; a.download = 'tgrb_standalone.html';
         document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-        alert('✅ Файл скачан!\n\nВсе правки, порядок вопросов и настройки включены. Для полной совместимости используйте локальный сервер (python -m http.server 8000 или VS Code Live Server).');
+        alert('Файл скачан!\n\nЭто точная копия текущей игры (включая Год 2, все правки и порядок вопросов), собранная из реальных файлов игры — не устаревший слепок. Для полной совместимости открывайте через локальный сервер (python -m http.server 8000 или VS Code Live Server).');
     }
+
 })();

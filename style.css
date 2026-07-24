@@ -97,15 +97,19 @@ html, body {
 }
 .neon-btn:active { transform: scale(.98); opacity: .9; }
 .neon-btn span { position: absolute; display: block; }
-.neon-btn span:nth-child(1) { top: 0; left: -100%; width: 100%; height: 2px; background: linear-gradient(90deg, transparent, var(--neon-blue)); animation: btn-anim1 1s linear infinite; }
+.neon-btn span:nth-child(1) { top: 0; left: -100%; width: 100%; height: 2px; background: linear-gradient(90deg, transparent, var(--neon-blue)); animation: btn-anim1 4s linear infinite; }
 @keyframes btn-anim1 { 0% { left: -100%; } 50%,100% { left: 100%; } }
-.neon-btn span:nth-child(2) { top: -100%; right: 0; width: 2px; height: 100%; background: linear-gradient(180deg, transparent, var(--neon-blue)); animation: btn-anim2 1s linear infinite; animation-delay: .25s; }
+.neon-btn span:nth-child(2) { top: -100%; right: 0; width: 2px; height: 100%; background: linear-gradient(180deg, transparent, var(--neon-blue)); animation: btn-anim2 4s linear infinite; animation-delay: 1s; }
 @keyframes btn-anim2 { 0% { top: -100%; } 50%,100% { top: 100%; } }
-.neon-btn span:nth-child(3) { bottom: 0; right: -100%; width: 100%; height: 2px; background: linear-gradient(270deg, transparent, var(--neon-blue)); animation: btn-anim3 1s linear infinite; animation-delay: .5s; }
+.neon-btn span:nth-child(3) { bottom: 0; right: -100%; width: 100%; height: 2px; background: linear-gradient(270deg, transparent, var(--neon-blue)); animation: btn-anim3 4s linear infinite; animation-delay: 2s; }
 @keyframes btn-anim3 { 0% { right: -100%; } 50%,100% { right: 100%; } }
-.neon-btn span:nth-child(4) { bottom: -100%; left: 0; width: 2px; height: 100%; background: linear-gradient(360deg, transparent, var(--neon-blue)); animation: btn-anim4 1s linear infinite; animation-delay: .75s; }
+.neon-btn span:nth-child(4) { bottom: -100%; left: 0; width: 2px; height: 100%; background: linear-gradient(360deg, transparent, var(--neon-blue)); animation: btn-anim4 4s linear infinite; animation-delay: 3s; }
 @keyframes btn-anim4 { 0% { bottom: -100%; } 50%,100% { bottom: 100%; } }
 .neon-btn.disabled { opacity: .35; pointer-events: none; filter: grayscale(.8); color: #444; border-color: #333; }
+.neon-btn.selected {
+  background: var(--neon-blue); color: #000; box-shadow: 0 0 16px var(--neon-blue);
+  border-color: var(--neon-blue); transition: background .15s, box-shadow .15s;
+}
 
 /* =========================================
    6. ADMIN MODE STYLES
@@ -126,17 +130,19 @@ html, body {
 }
 #admin-toggle:hover { color: var(--neon-blue); transform: rotate(90deg); }
 
-#save-btn, #export-btn, #reset-btn {
-  position: fixed; bottom: 15px; padding: 10px 16px; border-radius: 20px;
-  cursor: pointer; z-index: 10000; font-size: .9rem; font-weight: 700;
-  touch-action: manipulation; color: #fff; border: none;
+#admin-toolbar {
+  position: fixed; bottom: 15px; left: 15px; right: 70px; z-index: 10000;
+  display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-start;
 }
-#save-btn { right: 80px; background: #28a745; box-shadow: 0 0 10px rgba(40,167,69,0.5); }
-#save-btn:hover { background: #218838; }
-#export-btn { left: 185px; background: #03e9f4; color: #000; box-shadow: 0 0 10px rgba(3,233,244,0.5); }
+#save-btn, #export-btn, #reset-btn {
+  position: static; padding: 10px 16px; border-radius: 20px;
+  cursor: pointer; font-size: .9rem; font-weight: 700;
+  touch-action: manipulation; color: #000; border: none;
+  min-height: 44px; background: #03e9f4; box-shadow: 0 0 10px rgba(3,233,244,0.5);
+}
+#save-btn:hover { background: #02b8c4; }
 #export-btn:hover { background: #02b8c4; }
-#reset-btn { left: 15px; background: #ff4444; box-shadow: 0 0 10px rgba(255,68,68,0.5); }
-#reset-btn:hover { background: #e63939; }
+#reset-btn:hover { background: #02b8c4; }
 
 .admin-field { position: relative; flex: 1; min-width: 0; }
 .admin-field[data-tooltip]::after {
@@ -146,7 +152,7 @@ html, body {
   opacity: 0; pointer-events: none; transition: .2s; border: 1px solid var(--neon-blue);
   z-index: 9999; box-shadow: 0 4px 8px rgba(0,0,0,.5);
 }
-.admin-field[data-tooltip]:hover::after { opacity: 1; transform: translateX(-50%) scale(1); }
+.admin-field[data-tooltip]:hover::after, .admin-field[data-tooltip]:focus-within::after { opacity: 1; transform: translateX(-50%) scale(1); }
 
 .admin-option-card {
   border: 1px solid #444; padding: 12px; margin-bottom: 12px;
@@ -165,9 +171,9 @@ html, body {
 
 .admin-opt-remove {
   position: absolute; top: 8px; right: 8px; background: #ff4444; color: #fff;
-  border: none; width: 22px; height: 22px; border-radius: 50%; cursor: pointer;
-  font-size: 14px; line-height: 1; display: flex; align-items: center; justify-content: center;
-  transition: .2s; z-index: 2;
+  border: none; width: 36px; height: 36px; border-radius: 50%; cursor: pointer;
+  font-size: 16px; line-height: 1; display: flex; align-items: center; justify-content: center;
+  transition: .2s; z-index: 2; touch-action: manipulation;
 }
 .admin-opt-remove:hover { background: #cc0000; transform: scale(1.1); }
 
@@ -178,6 +184,14 @@ html, body {
   font-size: .9rem; font-weight: 700; transition: .2s;
 }
 .admin-add-option:hover { background: rgba(3,233,244,.2); }
+
+.move-btn {
+  background: none; border: none; color: var(--neon-blue); font-size: 1.2rem; cursor: pointer;
+  min-width: 40px; min-height: 40px; padding: 0; touch-action: manipulation;
+  display: flex; align-items: center; justify-content: center;
+}
+.move-btn:hover { color: #fff; }
+.move-btn:disabled { opacity: 0.3; cursor: default; }
 
 .nav-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; gap: 10px; }
 .nav-btn {

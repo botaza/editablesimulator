@@ -7,13 +7,37 @@ const DEFAULT_CONFIG = {
     adminPassword: "000",
     maxMoves: 12,
     startingBank: 150,
-    scoreMultiplier: 100
+    scoreMultiplier: 100,
+
+    // ===== YEAR 2 (added by patch_year_two.py) =====
+    // Coins reserved during Year 1: no option can be chosen if it would dip
+    // into this reserve, so every legal Year-1 playthrough (including the
+    // optimal one) always has at least this much left when Year 2 starts.
+    year2Reserve: 40,
+    // Fresh budget injected at the start of Year 2, on top of whatever
+    // was left over (>= year2Reserve) from Year 1.
+    year2Grant: 60,
+    // Year 2 tourists count for more -- it's a bigger, better-prepared season.
+    year2ScoreMultiplier: 130
   },
 
   // ===== UI TEXT (Root Scenes) =====
   ui: {
+    modeSelectTitle: "Выберите режим игры",
+    modeSelectText: "Можно сыграть только первый год (без ограничения на резерв бюджета) или пройти оба года подряд (часть бюджета первого года резервируется на второй).",
+    modeOneBtn: "Только 1 год",
+    modeTwoBtn: "Полные 2 года",
+    year1FinishBtn: "Завершить игру",
+    year2IntroTitle: "Год 2",
+    year2IntroText: [
+      "Первый туристический сезон завершён!",
+      "То, что вы построили и чему научили город, никуда не делось: все ваши наработки (кадры, продвижение, инфраструктура) переходят во второй год.",
+      "К оставшемуся бюджету добавлено дополнительное финансирование на новый сезон."
+    ],
+    year2IntroBtn: "Начать год 2",
+    year2FinalTitle: "Итоги (2 года)",
     mainTitle: "Виртуальная веб-игра",
-    mainSubtitle: "МИОСТ ВВГУ",
+    mainSubtitle: "ТГРБ ВВГУ",
     startBtn: "Старт",
     rulesBtn: "Правила",
     regTitle: "Познакомимся!*",
@@ -23,9 +47,10 @@ const DEFAULT_CONFIG = {
     regBtn: "Отправить",
     rulesText: [
       "Лето уже близко! Твоя задача -- подготовить наш город к туристическому сезону.",
-      "Игра дает тебе 12 ходов. Итоговое число привлеченных туристов ты узнаешь в конце игры.",
+      "Перед началом игры ты выбираешь один из двух сценариев: только первый год (12 ходов) или полные два года (12 ходов в первом году + 8 ходов во втором). Итоговое число привлеченных туристов ты узнаешь в конце выбранного сценария.",
       "Будь внимателен - бюджет невосполняем! Выбор действия, которое ты финансово не можешь себе позволить, приводит к поражению!",
       "При выборе действия, предпосылки для которого не были созданы на предыдущих этапах, происходит переход хода.",
+      "Резерв бюджета на второй сезон действует только в сценарии «Полные 2 года»: часть бюджета первого года остаётся недоступна для трат, а во втором году прибавляется к тому, что осталось после первого года, вместе с дополнительным финансированием на новый сезон. В сценарии «Только 1 год» никакой резерв не удерживается - весь бюджет первого года доступен для трат.",
       "Удачи!"
     ],
     rulesBackBtn: "Назад",
@@ -35,7 +60,7 @@ const DEFAULT_CONFIG = {
     lostRestartBtn: "Начать заново"
   },
 
-  // ===== GAME STEPS (01-013) =====
+  // ===== GAME STEPS - YEAR 1 (01-013) =====
   steps: [
     {
       id: 1, question: "На какого потребителя-туриста будем ориентироваться?",
@@ -146,6 +171,88 @@ const DEFAULT_CONFIG = {
     },
     {
       id: 13, question: "Узнать результаты...",
+      options: [
+        { id: 1, text: "ok", cost: 0, scoreGain: 0, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
+      ], nextStep: "final"
+    }
+  ],
+
+  // ===== GAME STEPS - YEAR 2 (added by patch_year_two.py) =====
+  // IDs start at 101 so they never collide with Year-1 step ids.
+  // Several options here are cheaper / score higher if the matching
+  // extraN threshold from Year 1 was met -- that's how Year-1 decisions
+  // pay off in Year 2, using the same conditionType/requiredExtra system
+  // you already use for in-year prerequisites.
+  steps2: [
+    {
+      id: 101, question: "Как расширим номерной фонд на второй сезон?",
+      options: [
+        { id: 1, text: "Строим ещё хостелов", cost: 15, scoreGain: 14, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 2, text: "Строим ещё глэмпингов", cost: 18, scoreGain: 17, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 3, text: "Расширяем силами своих же строителей (дешевле и быстрее)", cost: 10, scoreGain: 20, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 1, requiredExtra: 1 },
+        { id: 4, text: "Оставляем как есть", cost: 0, scoreGain: 5, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
+      ], nextStep: 102
+    },
+    {
+      id: 102, question: "Как усилим транспортную доступность во втором году?",
+      options: [
+        { id: 1, text: "Добавляем электрички чаще", cost: 10, scoreGain: 14, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 2, text: "Открываем автобусные маршруты для гостей из Китая/Кореи/Японии", cost: 12, scoreGain: 22, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 3, text: "Ничего не меняем", cost: 0, scoreGain: 4, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
+      ], nextStep: 103
+    },
+    {
+      id: 103, question: "Как развиваем гастрономию во второй год?",
+      options: [
+        { id: 1, text: "Делаем ставку на дальневосточную кухню как визитную карточку", cost: 6, scoreGain: 12, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 2, text: "Расширяем фастфуд-сегмент", cost: 5, scoreGain: 3, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 3, text: "Ничего не меняем", cost: 0, scoreGain: 2, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
+      ], nextStep: 104
+    },
+    {
+      id: 104, question: "Кто ведёт продвижение города во второй сезон?",
+      options: [
+        { id: 1, text: "Опять нанимаем стороннее агентство", cost: 18, scoreGain: 12, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 2, text: "Продвигаем силами своей команды (дешевле, эффект выше — команда уже обучена)", cost: 6, scoreGain: 22, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 1, requiredExtra: 1 },
+        { id: 3, text: "Не продвигаемся", cost: 0, scoreGain: 0, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
+      ], nextStep: 105
+    },
+    {
+      id: 105, question: "Событийная программа второго года?",
+      options: [
+        { id: 1, text: "Повторяем прошлогодний календарь фестивалей", cost: 10, scoreGain: 12, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 2, text: "Добавляем крупный якорный фестиваль под сформированный кластер", cost: 20, scoreGain: 26, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 3, text: "Сокращаем программу", cost: 0, scoreGain: 3, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
+      ], nextStep: 106
+    },
+    {
+      id: 106, question: "Как развиваем зимний туристический продукт во второй сезон?",
+      options: [
+        { id: 1, text: "Открываем горнолыжный курорт", cost: 20, scoreGain: 22, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 2, text: "Организуем зимние фестивали и ярмарки", cost: 10, scoreGain: 14, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 3, text: "Развиваем силами своей уже обученной команды (дешевле, эффект выше)", cost: 6, scoreGain: 20, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 1, requiredExtra: 1 },
+        { id: 4, text: "Ничего не меняем", cost: 0, scoreGain: 3, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
+      ], nextStep: 107
+    },
+    {
+      id: 107, question: "Как усиливаем гостеприимство (сервис) во второй сезон?",
+      options: [
+        { id: 1, text: "Обучаем персонал силами внешних тренеров", cost: 15, scoreGain: 12, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 2, text: "Внедряем стандарты сервиса силами своей обученной команды", cost: 5, scoreGain: 18, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 1, requiredExtra: 1 },
+        { id: 3, text: "Вводим программу лояльности для гостей", cost: 8, scoreGain: 10, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 4, text: "Не меняем ничего", cost: 0, scoreGain: 2, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
+      ], nextStep: 108
+    },
+    {
+      id: 108, question: "Как усиливаем цифровое присутствие города во втором сезоне?",
+      options: [
+        { id: 1, text: "Заказываем новый сайт и продвижение в соцсетях у агентства", cost: 14, scoreGain: 12, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 },
+        { id: 2, text: "Делаем это силами своей команды (дешевле, эффект выше)", cost: 5, scoreGain: 20, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 1, requiredExtra: 1 },
+        { id: 3, text: "Ограничиваемся текущими каналами", cost: 0, scoreGain: 4, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
+      ], nextStep: 109
+    },
+    {
+      id: 109, question: "Узнать итоговые результаты...",
       options: [
         { id: 1, text: "ok", cost: 0, scoreGain: 0, extra1Gain: 0, extra2Gain: 0, extra3Gain: 0, extra4Gain: 0, extra5Gain: 0, extra6Gain: 0, extra7Gain: 0, conditionType: 0, requiredExtra: 0 }
       ], nextStep: "final"
